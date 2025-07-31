@@ -1,0 +1,127 @@
+# SixthVault Backend Setup & User Management
+
+## Initial Setup
+python -m venv .venv      # optional but recommended
+source .venv/bin/activate # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env      # add your keys
+
+## Database & Admin Setup
+# 1. Start the application
+uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# 2. First user registration automatically becomes admin
+# Go to /register and create your account - you'll be the admin!
+
+# Alternative: Create initial admin user manually (optional)
+python create_initial_admin.py
+
+## User Management System Features
+
+### Multi-Tenant Architecture
+- Each company operates as an independent tenant
+- Complete data isolation between companies
+- Unlimited companies supported
+
+### Admin Capabilities (Per Company)
+- Create users with different roles (admin/user)
+- Manage user accounts (edit, delete, activate/deactivate)
+- Reset user passwords
+- View user statistics and sessions
+- Promote/demote admin privileges
+- Search and filter users
+
+### User Roles
+- **Admin**: Full user management + system access
+- **User**: System access + company data sharing
+
+### Admin Panel Endpoints
+- GET /admin/users - List all users with pagination
+- POST /admin/users - Create new user
+- GET /admin/users/{id} - Get user details
+- PUT /admin/users/{id} - Update user information
+- DELETE /admin/users/{id} - Delete user and all data
+- POST /admin/users/{id}/reset-password - Reset user password
+- POST /admin/users/{id}/toggle-status - Activate/deactivate user
+- POST /admin/users/{id}/promote-to-admin - Promote to admin
+- POST /admin/users/{id}/demote-from-admin - Demote from admin
+- GET /admin/users/{id}/sessions - View user sessions
+- POST /admin/users/{id}/revoke-sessions - Revoke all user sessions
+- GET /admin/users/search?q=query - Search users
+
+### Security Features
+- Password strength validation (8+ chars, uppercase, lowercase, digit)
+- JWT token-based authentication with company context
+- Session management and token revocation
+- Admin self-protection (can't delete/deactivate own account)
+- Email verification for new registrations
+- Password reset with verification codes
+
+### Database Schema
+- Enhanced User model with username, company_id, is_admin, is_active fields
+- UserToken table for session management
+- TempUser table for registration verification
+- Foreign key relationships for data integrity
+
+### Setup Instructions for Multiple Companies
+
+1. **Create First Company Admin**:
+   ```bash
+   python create_initial_admin.py
+   # Enter company A details and first admin credentials
+   ```
+
+2. **Login and Create Additional Admins**:
+   - Login with first admin at /login
+   - Go to /admin panel
+   - Create additional admin users for the same company
+
+3. **Create Second Company**:
+   ```bash
+   python create_initial_admin.py
+   # Enter company B details and first admin credentials
+   ```
+
+4. **Repeat for Additional Companies**
+
+### API Usage Examples
+
+**Create User (Admin only)**:
+```bash
+curl -X POST "http://localhost:8000/admin/users" \
+  -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@company.com",
+    "username": "johndoe",
+    "first_name": "John",
+    "last_name": "Doe",
+    "password": "SecurePass123",
+    "role": "user",
+    "is_admin": false,
+    "is_active": true
+  }'
+```
+
+**Search Users**:
+```bash
+curl -X GET "http://localhost:8000/admin/users/search?q=john" \
+  -H "Authorization: Bearer YOUR_ADMIN_TOKEN"
+```
+
+**Reset User Password**:
+```bash
+curl -X POST "http://localhost:8000/admin/users/{user_id}/reset-password-secure" \
+  -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"new_password": "NewSecurePass123"}'
+```
+
+### Production Considerations
+- Set strong JWT secrets in environment variables
+- Configure proper PostgreSQL connection settings
+- Enable HTTPS in production
+- Set up proper email service for notifications
+- Configure rate limiting for API endpoints
+- Set up monitoring for user activities

@@ -1,0 +1,8 @@
+Collecting redis[hiredis]
+  Downloading redis-6.2.0-py3-none-any.whl.metadata (10 kB)
+Collecting hiredis>=3.2.0 (from redis[hiredis])
+  Downloading hiredis-3.2.1-cp312-cp312-win_amd64.whl.metadata (7.7 kB)
+Downloading hiredis-3.2.1-cp312-cp312-win_amd64.whl (22 kB)
+Downloading redis-6.2.0-py3-none-any.whl (278 kB)
+Installing collected packages: redis, hiredis
+Successfully installed hiredis-3.2.1 redis-6.2.0
