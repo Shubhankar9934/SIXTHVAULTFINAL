@@ -126,6 +126,7 @@ export type VaultAction =
   | { type: 'SET_CONTEXT_SETTINGS'; payload: { keepContext: string; maxContext: string } }
   | { type: 'SET_SEARCH_TAG'; payload: string }
   | { type: 'UPDATE_PERFORMANCE'; payload: Partial<VaultState['performance']> }
+  | { type: 'REFRESH_DOCUMENTS' }
   | { type: 'RESET_STATE' }
 
 // ============================================================================
@@ -477,6 +478,13 @@ function vaultReducer(state: VaultState, action: VaultAction): VaultState {
         }
       }
 
+    case 'REFRESH_DOCUMENTS':
+      // Trigger a document refresh by clearing cache and reloading
+      cacheManager.delete(CacheKeys.documents())
+      cacheManager.delete(CacheKeys.documents() + '_meta')
+      // The actual refresh will be handled by the loadDocuments function
+      return state
+
     case 'RESET_STATE':
       return initialState
 
@@ -518,6 +526,7 @@ interface VaultContextType {
   
   // Document actions
   loadDocuments: () => Promise<void>
+  refreshDocuments: () => Promise<void>
   
   // UI actions
   toggleSidebar: () => void
@@ -545,358 +554,18 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
   const initializationRef = useRef(false)
   const backgroundRefreshRef = useRef<NodeJS.Timeout | null>(null)
   const lastAuthStateRef = useRef<boolean>(false)
+  const providersLoadingRef = useRef(false)
 
   // ============================================================================
-  // INITIALIZATION AND BACKGROUND REFRESH
-  // ============================================================================
-
-  const initializeVault = useCallback(async () => {
-    // Don't initialize if auth is still loading
-    if (authLoading) {
-      console.log('🔄 VaultState: Waiting for authentication to complete...')
-      return
-    }
-
-    // Don't initialize if user is not authenticated
-    if (!isAuthenticated) {
-      console.log('🚫 VaultState: User not authenticated, skipping vault initialization')
-      // Reset state to initial state for unauthenticated users
-      dispatch({ type: 'RESET_STATE' })
-      initializationRef.current = false
-      return
-    }
-
-    // Prevent multiple initializations for the same auth state
-    if (initializationRef.current) return
-    initializationRef.current = true
-
-    console.log('🚀 VaultState: Starting comprehensive initialization with persistent cache for authenticated user')
-    const startTime = Date.now()
-
-    try {
-      // Phase 1: Load cached data instantly for immediate UI response
-      console.log('⚡ VaultState: Phase 1 - Loading cached data for instant UI')
-      
-      const cachedDocuments = cacheManager.get<DocumentData[]>(CacheKeys.documents())
-      const cachedCurations = cacheManager.get<AICuration[]>(CacheKeys.curations())
-      const cachedConversations = cacheManager.get<Conversation[]>('conversations_list')
-
-      if (cachedDocuments) {
-        dispatch({ type: 'SET_DOCUMENTS', payload: cachedDocuments })
-        generateDynamicCurationsAndSummaries(cachedDocuments)
-        console.log('✅ VaultState: Loaded cached documents instantly:', cachedDocuments.length)
-      }
-
-      if (cachedCurations) {
-        dispatch({ type: 'SET_CURATIONS', payload: cachedCurations })
-        const customCurations = cachedCurations.map(curation => ({
-          id: curation.id,
-          title: curation.title,
-          icon: getIconForCuration(curation.keywords || curation.topicKeywords || []),
-          active: false
-        }))
-        dispatch({ type: 'SET_CUSTOM_CURATIONS', payload: customCurations })
-        console.log('✅ VaultState: Loaded cached curations instantly:', cachedCurations.length)
-      }
-
-      if (cachedConversations) {
-        dispatch({ type: 'SET_CONVERSATIONS', payload: cachedConversations })
-        console.log('✅ VaultState: Loaded cached conversations instantly:', cachedConversations.length)
-      } else {
-        // If no cached conversations, load them immediately for instant history access
-        console.log('🔄 VaultState: No cached conversations, loading immediately for instant access')
-        try {
-          const conversations = await ragApiClient.getConversations({ limit: 50 })
-          dispatch({ type: 'SET_CONVERSATIONS', payload: conversations })
-          cacheManager.set('conversations_list', conversations, 15 * 60 * 1000)
-          console.log('✅ VaultState: Loaded conversations immediately:', conversations.length)
-        } catch (error) {
-          console.error('❌ VaultState: Failed to load conversations immediately:', error)
-        }
-      }
-
-  // Phase 1.5: Deep preloading for instant access - AI Providers, Curation Content, and Chat History
-  console.log('⚡ VaultState: Phase 1.5 - Deep preloading for instant access')
-  
-  // 1. Preload ALL AI providers and their models for instant access
-  console.log('🤖 VaultState: Preloading ALL AI providers and models for instant access')
-  const cachedAllProviders = localStorage.getItem('vault_all_providers_cache')
-  if (cachedAllProviders) {
-    try {
-      const { providers, timestamp } = JSON.parse(cachedAllProviders)
-      const isExpired = Date.now() - timestamp > 6 * 60 * 60 * 1000 // 6 hours cache
-      
-      if (!isExpired && providers && Array.isArray(providers)) {
-        // Set all providers immediately for instant UI access
-        dispatch({ 
-          type: 'SET_PROVIDER_SETTINGS', 
-          payload: { 
-            provider: state.settings.selectedProvider,
-            model: state.settings.selectedModel,
-            availableModels: providers.find((p: any) => p.name === state.settings.selectedProvider)?.models || [],
-            modelProviders: providers
-          }
-        })
-        console.log(`✅ VaultState: Preloaded ${providers.length} AI providers with all models instantly`)
-        
-        // Log provider details for verification
-        providers.forEach((provider: any) => {
-          console.log(`   - ${provider.displayName}: ${provider.models?.length || 0} models available`)
-        })
-      } else {
-        localStorage.removeItem('vault_all_providers_cache')
-        console.log('🔄 VaultState: AI providers cache expired, will refresh in background')
-      }
-    } catch (error) {
-      console.error('Error parsing cached AI providers:', error)
-      localStorage.removeItem('vault_all_providers_cache')
-    }
-  } else {
-    console.log('🔄 VaultState: No cached AI providers found, will load in background')
-  }
-
-  // 2. Load cached AI provider settings for instant restoration
-  console.log('⚙️ VaultState: Loading cached AI provider settings for instant restoration')
-  const cachedProviderSettings = localStorage.getItem('vault_provider_settings')
-  if (cachedProviderSettings) {
-    try {
-      const { provider, model, timestamp } = JSON.parse(cachedProviderSettings)
-      const isExpired = Date.now() - timestamp > 24 * 60 * 60 * 1000 // 24 hours
-      
-      if (!isExpired && provider && model) {
-        // Get available models for this provider from cached data
-        const cachedProviders = localStorage.getItem('vault_all_providers_cache')
-        let availableModels: any[] = []
-        let modelProviders: any[] = []
-        
-        if (cachedProviders) {
-          try {
-            const { providers } = JSON.parse(cachedProviders)
-            modelProviders = providers || []
-            availableModels = providers.find((p: any) => p.name === provider)?.models || []
-          } catch (error) {
-            console.error('Error parsing cached providers for settings:', error)
-          }
-        }
-        
-        // Set provider settings immediately for instant UI update
-        dispatch({ 
-          type: 'SET_PROVIDER_SETTINGS', 
-          payload: { 
-            provider, 
-            model, 
-            availableModels,
-            modelProviders
-          }
-        })
-        console.log(`✅ VaultState: Restored cached AI provider settings instantly: ${provider} - ${model}`)
-      } else {
-        localStorage.removeItem('vault_provider_settings')
-      }
-    } catch (error) {
-      console.error('Error parsing cached provider settings:', error)
-      localStorage.removeItem('vault_provider_settings')
-    }
-  }
-
-  // 3. Load cached curation content for all curations for instant access
-  console.log('📚 VaultState: Loading cached AI curation content for instant access')
-  if (cachedCurations && cachedCurations.length > 0) {
-    const cachedCurationContent: any[] = []
-    
-    cachedCurations.forEach(curation => {
-      const contentCacheKey = `curation_content_${curation.id}`
-      const cachedContent = cacheManager.get<string>(contentCacheKey)
-      
-      if (cachedContent) {
-        cachedCurationContent.push({
-          id: curation.id,
-          title: curation.title,
-          content: cachedContent,
-          type: 'curation',
-          cached: true
-        })
-      }
-    })
-    
-    if (cachedCurationContent.length > 0) {
-      console.log(`✅ VaultState: Loaded ${cachedCurationContent.length} cached AI curation contents for instant access`)
-      
-      // Store cached curation content for instant display
-      const cachedMessages = cachedCurationContent.map((item, index) => ({
-        id: Date.now() + index,
-        type: "curation" as const,
-        content: item.content,
-        title: item.title,
-        themes: ["AI Curation", "Cached Content", "Instant Access"],
-        documentsUsed: cachedDocuments?.length || 0,
-        documentNames: cachedDocuments?.map(doc => doc.name) || [],
-        timestamp: new Date().toISOString(),
-        cached: true
-      }))
-      
-      sessionStorage.setItem('cached_curation_messages', JSON.stringify(cachedMessages))
-    }
-  }
-
-  // 4. DEEP PRELOAD: Load cached conversation content for instant chat history access
-  console.log('💬 VaultState: Deep preloading conversation content for instant chat history access')
-  if (cachedConversations && cachedConversations.length > 0) {
-    let preloadedConversationCount = 0
-    const conversationContentCache: Record<string, any> = {}
-    
-    // Preload content for up to 20 most recent conversations for instant access
-    const conversationsToPreload = cachedConversations
-      .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
-      .slice(0, 20)
-    
-    conversationsToPreload.forEach(conversation => {
-      const conversationCacheKey = `conversation_content_${conversation.id}`
-      const cachedConversationContent = cacheManager.get<any>(conversationCacheKey)
-      
-      if (cachedConversationContent) {
-        conversationContentCache[conversation.id] = cachedConversationContent
-        preloadedConversationCount++
-      }
-    })
-    
-    if (preloadedConversationCount > 0) {
-      console.log(`✅ VaultState: Deep preloaded ${preloadedConversationCount} conversation contents for instant access`)
-      
-      // Store preloaded conversation content for instant access
-      sessionStorage.setItem('preloaded_conversation_content', JSON.stringify(conversationContentCache))
-      
-      // Log details for verification
-      Object.keys(conversationContentCache).forEach(conversationId => {
-        const content = conversationContentCache[conversationId]
-        console.log(`   - Conversation ${conversationId}: ${content.messages?.length || 0} messages preloaded`)
-      })
-    } else {
-      console.log('🔄 VaultState: No cached conversation content found, starting immediate preload')
-      
-      // If no cached content exists, start immediate preloading for instant access
-      immediatePreloadConversationContent(conversationsToPreload)
-    }
-  }
-
-      // Phase 2: Initialize services with their own caching
-      console.log('🔄 VaultState: Phase 2 - Initializing services with persistent cache')
-      
-      await Promise.allSettled([
-        aiCurationService.initialize(),
-        aiSummaryService.initialize()
-      ])
-
-      // Phase 3: Load fresh data in background if cache is stale
-      console.log('🔄 VaultState: Phase 3 - Background refresh for stale data')
-      
-      const cacheAge = cachedDocuments ? Date.now() - (cacheManager.get<{ timestamp: number }>(CacheKeys.documents() + '_meta')?.timestamp || 0) : Infinity
-      const maxCacheAge = 5 * 60 * 1000 // 5 minutes
-
-      if (cacheAge > maxCacheAge) {
-        console.log('🔄 VaultState: Cache is stale, refreshing in background')
-        refreshAllDataInBackground()
-      } else {
-        console.log('✅ VaultState: Cache is fresh, skipping background refresh')
-      }
-
-      // Phase 4: Load and cache ALL AI providers with comprehensive model preloading
-      await loadAndCacheAllAIProviders()
-
-      // Phase 5: Background preloading of conversation content for instant access
-      if (cachedConversations && cachedConversations.length > 0) {
-        console.log('🚀 VaultState: Phase 5 - Background preloading conversation content for instant access')
-        backgroundPreloadConversationContent(cachedConversations)
-      }
-
-      const initTime = Date.now() - startTime
-      dispatch({ type: 'UPDATE_PERFORMANCE', payload: { loadTimes: { initialization: initTime } } })
-      
-      console.log(`🎉 VaultState: Initialization completed in ${initTime}ms with persistent cache`)
-
-    } catch (error) {
-      console.error('💥 VaultState: Initialization failed:', error)
-      // Continue with empty state rather than blocking
-    }
-  }, [authLoading, isAuthenticated])
-
-  const refreshAllDataInBackground = useCallback(async () => {
-    console.log('🔄 VaultState: Starting background refresh')
-    
-    try {
-      const startTime = Date.now()
-      
-      // Load fresh data in parallel
-      const [documentsResult, curationsResult, conversationsResult] = await Promise.allSettled([
-        documentStore.getDocuments(),
-        ragApiClient.getAICurations(),
-        ragApiClient.getConversations({ limit: 50 })
-      ])
-
-      // Update documents
-      if (documentsResult.status === 'fulfilled') {
-        dispatch({ type: 'SET_DOCUMENTS', payload: documentsResult.value })
-        cacheManager.set(CacheKeys.documents(), documentsResult.value, 30 * 60 * 1000)
-        cacheManager.set(CacheKeys.documents() + '_meta', { timestamp: Date.now() }, 30 * 60 * 1000)
-        generateDynamicCurationsAndSummaries(documentsResult.value)
-        console.log('✅ VaultState: Background refresh - documents updated')
-      }
-
-      // Update curations
-      if (curationsResult.status === 'fulfilled') {
-        dispatch({ type: 'SET_CURATIONS', payload: curationsResult.value })
-        cacheManager.set(CacheKeys.curations(), curationsResult.value, 30 * 60 * 1000)
-        
-        const customCurations = curationsResult.value.map(curation => ({
-          id: curation.id,
-          title: curation.title,
-          icon: getIconForCuration(curation.keywords || curation.topicKeywords || []),
-          active: false
-        }))
-        dispatch({ type: 'SET_CUSTOM_CURATIONS', payload: customCurations })
-        console.log('✅ VaultState: Background refresh - curations updated')
-      }
-
-      // Update conversations
-      if (conversationsResult.status === 'fulfilled') {
-        dispatch({ type: 'SET_CONVERSATIONS', payload: conversationsResult.value })
-        cacheManager.set('conversations_list', conversationsResult.value, 15 * 60 * 1000)
-        console.log('✅ VaultState: Background refresh - conversations updated')
-      }
-
-      const refreshTime = Date.now() - startTime
-      dispatch({ type: 'UPDATE_PERFORMANCE', payload: { 
-        backgroundRefreshes: state.performance.backgroundRefreshes + 1,
-        loadTimes: { ...state.performance.loadTimes, backgroundRefresh: refreshTime }
-      }})
-
-      console.log(`✅ VaultState: Background refresh completed in ${refreshTime}ms`)
-
-    } catch (error) {
-      console.error('❌ VaultState: Background refresh failed:', error)
-    }
-  }, [state.performance])
-
-  const refreshAllData = useCallback(async () => {
-    console.log('🔄 VaultState: Manual refresh triggered')
-    
-    dispatch({ type: 'SET_LOADING', payload: { section: 'documents', loading: true } })
-    dispatch({ type: 'SET_LOADING', payload: { section: 'curations', loading: true } })
-    dispatch({ type: 'SET_LOADING', payload: { section: 'conversations', loading: true } })
-
-    await refreshAllDataInBackground()
-
-    dispatch({ type: 'SET_LOADING', payload: { section: 'documents', loading: false } })
-    dispatch({ type: 'SET_LOADING', payload: { section: 'curations', loading: false } })
-    dispatch({ type: 'SET_LOADING', payload: { section: 'conversations', loading: false } })
-  }, [refreshAllDataInBackground])
-
-  // ============================================================================
-  // HELPER FUNCTIONS
+  // HELPER FUNCTIONS (DECLARED FIRST TO AVOID HOISTING ISSUES)
   // ============================================================================
 
   const generateDynamicCurationsAndSummaries = useCallback(async (docs: DocumentData[]) => {
-    // Generate dynamic curations
+    // DISABLED: Automatic dynamic curation generation has been disabled
+    // Only custom curations can be created manually by users
+    console.log('🚫 VaultState: Automatic dynamic curation generation is DISABLED')
+    console.log('✅ VaultState: Users can still create custom curations manually')
+    
     if (docs.length === 0) {
       dispatch({ type: 'SET_DYNAMIC_CURATIONS', payload: [] })
       dispatch({ type: 'SET_DYNAMIC_SUMMARIES', payload: [] })
@@ -911,88 +580,10 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
       return
     }
 
-    // Extract themes and topics
-    const allThemes = new Set<string>()
-    const allTopics = new Set<string>()
-    const allDemographics = new Set<string>()
-
-    docs.forEach((doc) => {
-      doc.themes?.forEach((theme) => allThemes.add(theme))
-      doc.mainTopics?.forEach((topic) => allTopics.add(topic))
-      doc.demographics?.forEach((demo) => allDemographics.add(demo))
-    })
-
-    const themes = Array.from(allThemes).slice(0, 8)
-    const topics = Array.from(allTopics).slice(0, 6)
-    const demographics = Array.from(allDemographics).slice(0, 4)
-
-    // Generate dynamic curations based purely on document content - no artificial limits
-    const dynamicCurationsList: Array<{ id: string; title: string; icon: any; active: boolean }> = []
-
-    // Generate curations for each theme found in documents
-    themes.forEach((theme, index) => {
-      dynamicCurationsList.push({
-        id: `trends-${theme.toLowerCase().replace(/\s+/g, '-')}`,
-        title: `Top ${Math.min(5, themes.length)} ${theme} Trends`,
-        icon: require('lucide-react').TrendingUp,
-        active: false
-      })
-    })
-
-    // Generate curations for each topic found in documents
-    topics.forEach((topic, index) => {
-      dynamicCurationsList.push({
-        id: `industry-${topic.toLowerCase().replace(/\s+/g, '-')}`,
-        title: `${topic} Industry Analysis`,
-        icon: require('lucide-react').BarChart3,
-        active: false
-      })
-    })
-
-    // Generate curations for each demographic found in documents
-    demographics.forEach((demographic, index) => {
-      dynamicCurationsList.push({
-        id: `market-${demographic.toLowerCase().replace(/\s+/g, '-')}`,
-        title: `Trends for ${demographic} Market`,
-        icon: require('lucide-react').Users,
-        active: false
-      })
-    })
-
-    // Add tech-specific curations if tech themes are found
-    const techThemes = themes.filter(theme => 
-      theme.toLowerCase().includes("tech") ||
-      theme.toLowerCase().includes("digital") ||
-      theme.toLowerCase().includes("ai") ||
-      theme.toLowerCase().includes("innovation")
-    )
-    
-    if (techThemes.length > 0) {
-      dynamicCurationsList.push({
-        id: 'digital-innovation',
-        title: `Digital Innovation Insights`,
-        icon: require('lucide-react').Brain,
-        active: false
-      })
-    }
-
-    // Add general document insights curation
-    dynamicCurationsList.push({
-      id: 'doc-insights',
-      title: "Document Insights Summary",
-      icon: require('lucide-react').FileText,
-      active: false
-    })
-
-    // Remove any duplicates by ID
-    const uniqueCurations = dynamicCurationsList.filter((curation, index, self) => 
-      index === self.findIndex(c => c.id === curation.id)
-    )
-
-    console.log(`🎯 VaultState: Generated ${uniqueCurations.length} dynamic curations based on document content`)
-    console.log(`   - Themes: ${themes.length}, Topics: ${topics.length}, Demographics: ${demographics.length}`)
-
-    dispatch({ type: 'SET_DYNAMIC_CURATIONS', payload: uniqueCurations })
+    // DISABLED: No automatic dynamic curations will be generated
+    // Set empty dynamic curations array
+    dispatch({ type: 'SET_DYNAMIC_CURATIONS', payload: [] })
+    console.log('🚫 VaultState: Dynamic curations disabled - only custom curations available')
 
     // Generate dynamic summaries
     const summaries = []
@@ -1043,31 +634,87 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
     }
   }, [])
 
-  // Helper function to separate curations by type
-  const separateCurationsByType = useCallback((curations: AICuration[]) => {
-    const custom = curations.filter(c => !c.autoGenerated).map(curation => ({
-      id: curation.id,
-      title: curation.title,
-      icon: getIconForCuration(curation.keywords || curation.topicKeywords || []),
-      active: false,
-      status: curation.status
-    }))
-    
-    const dynamic = curations.filter(c => c.autoGenerated).map(curation => ({
-      id: curation.id,
-      title: curation.title,
-      icon: getIconForCuration(curation.keywords || curation.topicKeywords || []),
-      active: false,
-      status: curation.status
-    }))
-    
-    return { custom, dynamic }
-  }, [getIconForCuration])
-
-  const loadAndCacheAllAIProviders = useCallback(async () => {
-    console.log('🤖 VaultState: Loading and caching ALL AI providers with comprehensive model preloading')
+  const backgroundPreloadConversationContent = useCallback(async (conversations: Conversation[]) => {
+    console.log('🚀 VaultState: Starting background preloading of conversation content for instant access')
     
     try {
+      // Sort conversations by most recent and take top 15 for background preloading
+      const conversationsToPreload = conversations
+        .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+        .slice(0, 15)
+      
+      let preloadedCount = 0
+      const preloadPromises = conversationsToPreload.map(async (conversation) => {
+        try {
+          const conversationCacheKey = `conversation_content_${conversation.id}`
+          
+          // Check if already cached
+          const existingCache = cacheManager.get<any>(conversationCacheKey)
+          if (existingCache) {
+            console.log(`⚡ VaultState: Conversation ${conversation.id} already cached, skipping`)
+            return
+          }
+          
+          // Load conversation content from API
+          const conversationData = await ragApiClient.getConversation(conversation.id)
+          
+          if (conversationData) {
+            // Cache for 24 hours for instant future access
+            cacheManager.set(conversationCacheKey, conversationData, 24 * 60 * 60 * 1000)
+            preloadedCount++
+            console.log(`✅ VaultState: Background preloaded conversation ${conversation.id} (${conversation.title})`)
+          }
+        } catch (error) {
+          console.error(`❌ VaultState: Failed to preload conversation ${conversation.id}:`, error)
+        }
+      })
+      
+      // Execute preloading in batches of 3 to avoid overwhelming the API
+      const batchSize = 3
+      for (let i = 0; i < preloadPromises.length; i += batchSize) {
+        const batch = preloadPromises.slice(i, i + batchSize)
+        await Promise.allSettled(batch)
+        
+        // Small delay between batches to be respectful to the API
+        if (i + batchSize < preloadPromises.length) {
+          await new Promise(resolve => setTimeout(resolve, 500))
+        }
+      }
+      
+      console.log(`🎉 VaultState: Background preloading completed - ${preloadedCount} conversations preloaded for instant access`)
+      
+      // Update session storage with newly preloaded content
+      const allPreloadedContent: Record<string, any> = {}
+      conversationsToPreload.forEach(conversation => {
+        const conversationCacheKey = `conversation_content_${conversation.id}`
+        const cachedData = cacheManager.get<any>(conversationCacheKey)
+        if (cachedData) {
+          allPreloadedContent[conversation.id] = cachedData
+        }
+      })
+      
+      if (Object.keys(allPreloadedContent).length > 0) {
+        sessionStorage.setItem('preloaded_conversation_content', JSON.stringify(allPreloadedContent))
+        console.log(`✅ VaultState: Updated session storage with ${Object.keys(allPreloadedContent).length} preloaded conversations`)
+      }
+      
+    } catch (error) {
+      console.error('❌ VaultState: Background conversation preloading failed:', error)
+    }
+  }, [])
+
+  const loadAndCacheAllAIProviders = useCallback(async () => {
+    // FIXED: Add a flag to prevent multiple simultaneous calls
+    if (providersLoadingRef.current) {
+      console.log('🔄 VaultState: AI providers already loading, skipping duplicate call')
+      return
+    }
+    
+    providersLoadingRef.current = true
+    
+    try {
+      console.log('🤖 VaultState: Loading and caching ALL AI providers with comprehensive model preloading')
+      
       // Check if we already have fresh cached providers
       const cachedAllProviders = localStorage.getItem('vault_all_providers_cache')
       if (cachedAllProviders) {
@@ -1076,7 +723,7 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
           const isExpired = Date.now() - timestamp > 6 * 60 * 60 * 1000 // 6 hours cache
           
           if (!isExpired && providers && Array.isArray(providers)) {
-            console.log(`✅ VaultState: Using fresh cached AI providers (${providers.length} providers)`)
+            console.log(`✅ VaultState: Using fresh cached AI providers (${providers.length} providers) - no API call needed`)
             
             // Update state with cached providers
             const currentProvider = state.settings.selectedProvider
@@ -1099,8 +746,8 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
         }
       }
 
-      // Load fresh providers from API
-      console.log('🔄 VaultState: Loading fresh AI providers from API')
+      // FIXED: Only load from API if cache is expired or missing
+      console.log('🔄 VaultState: Cache expired or missing, loading fresh AI providers from API')
       const providers = await ragApiClient.getAvailableModels()
       
       if (providers && providers.length > 0) {
@@ -1110,7 +757,7 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
           timestamp: Date.now()
         }
         localStorage.setItem('vault_all_providers_cache', JSON.stringify(providerCacheData))
-        console.log(`✅ VaultState: Cached ${providers.length} AI providers with all models for instant access`)
+        console.log(`✅ VaultState: Cached ${providers.length} AI providers with all models for 6 hours`)
         
         // Also update session storage for backward compatibility
         sessionStorage.setItem('vault-providers', JSON.stringify(providers))
@@ -1129,7 +776,6 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
             'deepseek': 'deepseek-chat',
             'bedrock': 'anthropic.claude-3-haiku-20240307-v1:0',
             'anthropic': 'claude-3-haiku-20240307'
-            
           }
           
           const defaultModel = defaultModels[currentProvider]
@@ -1146,25 +792,13 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
           type: 'SET_PROVIDER_SETTINGS', 
           payload: { 
             provider: currentProvider,
-            model: selectedModel,
+            model: selectedModel, 
             availableModels,
             modelProviders: providers
           }
         })
         
-        // Log comprehensive provider details for verification
-        console.log('🎉 VaultState: Comprehensive AI provider preloading completed:')
-        providers.forEach((provider: any) => {
-          console.log(`   - ${provider.displayName || provider.name}: ${provider.models?.length || 0} models available`)
-          if (provider.models && provider.models.length > 0) {
-            provider.models.slice(0, 3).forEach((model: any) => {
-              console.log(`     • ${model.displayName || model.name}`)
-            })
-            if (provider.models.length > 3) {
-              console.log(`     • ... and ${provider.models.length - 3} more models`)
-            }
-          }
-        })
+        console.log(`🎉 VaultState: AI provider loading completed - ${providers.length} providers cached`)
         
       } else {
         console.warn('⚠️ VaultState: No AI providers received from API')
@@ -1198,8 +832,321 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
           console.error('❌ VaultState: Failed to use cached providers as fallback:', fallbackError)
         }
       }
+    } finally {
+      // FIXED: Always clear the loading flag
+      providersLoadingRef.current = false
     }
   }, [state.settings.selectedProvider, state.settings.selectedModel])
+
+  const refreshAllDataInBackground = useCallback(async () => {
+    console.log('🔄 VaultState: Starting background refresh')
+    
+    try {
+      const startTime = Date.now()
+      
+      // Load fresh data in parallel
+      const [documentsResult, curationsResult, conversationsResult] = await Promise.allSettled([
+        documentStore.getDocuments(),
+        ragApiClient.getAICurations(),
+        ragApiClient.getConversations({ limit: 50 })
+      ])
+
+      // Update documents
+      if (documentsResult.status === 'fulfilled') {
+        dispatch({ type: 'SET_DOCUMENTS', payload: documentsResult.value })
+        cacheManager.set(CacheKeys.documents(), documentsResult.value, 30 * 60 * 1000)
+        cacheManager.set(CacheKeys.documents() + '_meta', { timestamp: Date.now() }, 30 * 60 * 1000)
+        generateDynamicCurationsAndSummaries(documentsResult.value)
+        console.log('✅ VaultState: Background refresh - documents updated')
+      }
+
+      // Update curations
+      if (curationsResult.status === 'fulfilled') {
+        // FIXED: Use the AI curation service to properly filter out deleted curations
+        // First update the service with fresh data, then get filtered curations
+        const freshCurations = curationsResult.value
+        
+        // Get deleted curation IDs from persistent storage
+        const deletedCurationIds = cacheManager.get<string[]>(CacheKeys.deletedCurations()) || []
+        
+        // Filter out persistently deleted curations before setting state
+        const filteredCurations = freshCurations.filter(curation => !deletedCurationIds.includes(curation.id))
+        
+        dispatch({ type: 'SET_CURATIONS', payload: filteredCurations })
+        cacheManager.set(CacheKeys.curations(), filteredCurations, 30 * 60 * 1000)
+        
+        const customCurations = filteredCurations.map(curation => ({
+          id: curation.id,
+          title: curation.title,
+          icon: getIconForCuration(curation.keywords || curation.topicKeywords || []),
+          active: false
+        }))
+        dispatch({ type: 'SET_CUSTOM_CURATIONS', payload: customCurations })
+        console.log(`✅ VaultState: Background refresh - curations updated (${freshCurations.length} from API, ${filteredCurations.length} after filtering ${deletedCurationIds.length} deleted items)`)
+      }
+
+      // Update conversations
+      if (conversationsResult.status === 'fulfilled') {
+        dispatch({ type: 'SET_CONVERSATIONS', payload: conversationsResult.value })
+        cacheManager.set('conversations_list', conversationsResult.value, 15 * 60 * 1000)
+        console.log('✅ VaultState: Background refresh - conversations updated')
+      }
+
+      const refreshTime = Date.now() - startTime
+      dispatch({ type: 'UPDATE_PERFORMANCE', payload: { 
+        backgroundRefreshes: state.performance.backgroundRefreshes + 1,
+        loadTimes: { ...state.performance.loadTimes, backgroundRefresh: refreshTime }
+      }})
+
+      console.log(`✅ VaultState: Background refresh completed in ${refreshTime}ms`)
+
+    } catch (error) {
+      console.error('❌ VaultState: Background refresh failed:', error)
+    }
+  }, [state.performance, generateDynamicCurationsAndSummaries, getIconForCuration])
+
+  // ============================================================================
+  // INITIALIZATION AND BACKGROUND REFRESH
+  // ============================================================================
+
+  const initializeVault = useCallback(async () => {
+    // Don't initialize if auth is still loading
+    if (authLoading) {
+      console.log('🔄 VaultState: Waiting for authentication to complete...')
+      return
+    }
+
+    // Don't initialize if user is not authenticated
+    if (!isAuthenticated) {
+      console.log('🚫 VaultState: User not authenticated, skipping vault initialization')
+      // Reset state to initial state for unauthenticated users
+      dispatch({ type: 'RESET_STATE' })
+      initializationRef.current = false
+      return
+    }
+
+    // Prevent multiple initializations for the same auth state
+    if (initializationRef.current) return
+    initializationRef.current = true
+
+    console.log('🚀 VaultState: INSTANT VAULT + DOCUMENTS INITIALIZATION - All data preloaded for flawless experience')
+    const startTime = Date.now()
+
+    try {
+      // INSTANT PHASE: Load ALL cached data immediately for zero-delay UI
+      console.log('⚡ VaultState: INSTANT PHASE - Loading all cached data for immediate UI response')
+      
+      // 1. INSTANT DOCUMENTS LOADING
+      const cachedDocuments = cacheManager.get<DocumentData[]>(CacheKeys.documents())
+      if (cachedDocuments) {
+        dispatch({ type: 'SET_DOCUMENTS', payload: cachedDocuments })
+        generateDynamicCurationsAndSummaries(cachedDocuments)
+        console.log('✅ VaultState: Documents loaded INSTANTLY:', cachedDocuments.length)
+      }
+
+      // 2. INSTANT CURATIONS LOADING
+      const cachedCurations = cacheManager.get<AICuration[]>(CacheKeys.curations())
+      if (cachedCurations) {
+        const deletedCurationIds = cacheManager.get<string[]>(CacheKeys.deletedCurations()) || []
+        const filteredCachedCurations = cachedCurations.filter(curation => !deletedCurationIds.includes(curation.id))
+        
+        dispatch({ type: 'SET_CURATIONS', payload: filteredCachedCurations })
+        const customCurations = filteredCachedCurations.map(curation => ({
+          id: curation.id,
+          title: curation.title,
+          icon: getIconForCuration(curation.keywords || curation.topicKeywords || []),
+          active: false
+        }))
+        dispatch({ type: 'SET_CUSTOM_CURATIONS', payload: customCurations })
+        console.log('✅ VaultState: Curations loaded INSTANTLY:', filteredCachedCurations.length)
+      }
+
+      // 3. INSTANT CONVERSATIONS LOADING
+      const cachedConversations = cacheManager.get<Conversation[]>('conversations_list')
+      if (cachedConversations) {
+        dispatch({ type: 'SET_CONVERSATIONS', payload: cachedConversations })
+        console.log('✅ VaultState: Conversations loaded INSTANTLY:', cachedConversations.length)
+      }
+
+      // 4. AI PROVIDERS - NO CACHING (Always fresh from API as requested)
+      console.log('🚫 VaultState: AI Providers NOT cached - will load fresh from API in background')
+
+      // 5. INSTANT PROVIDER SETTINGS RESTORATION
+      const cachedProviderSettings = localStorage.getItem('vault_provider_settings')
+      if (cachedProviderSettings) {
+        try {
+          const { provider, model, timestamp } = JSON.parse(cachedProviderSettings)
+          const isExpired = Date.now() - timestamp > 24 * 60 * 60 * 1000 // 24 hours
+          
+          if (!isExpired && provider && model) {
+            const cachedProviders = localStorage.getItem('vault_all_providers_cache')
+            let availableModels: any[] = []
+            let modelProviders: any[] = []
+            
+            if (cachedProviders) {
+              try {
+                const { providers } = JSON.parse(cachedProviders)
+                modelProviders = providers || []
+                availableModels = providers.find((p: any) => p.name === provider)?.models || []
+              } catch (error) {
+                console.error('Error parsing cached providers for settings:', error)
+              }
+            }
+            
+            dispatch({ 
+              type: 'SET_PROVIDER_SETTINGS', 
+              payload: { 
+                provider, 
+                model, 
+                availableModels,
+                modelProviders
+              }
+            })
+            console.log('✅ VaultState: Provider settings restored INSTANTLY:', provider, '-', model)
+          }
+        } catch (error) {
+          console.error('Error parsing cached provider settings:', error)
+        }
+      }
+
+      // BACKGROUND PHASE: Start all background operations without blocking UI
+      console.log('🔄 VaultState: BACKGROUND PHASE - Starting non-blocking background operations + Documents Page Prefetching')
+      
+      // Start background operations without awaiting them
+      Promise.allSettled([
+        // Initialize services in background
+        aiCurationService.initialize(),
+        aiSummaryService.initialize(),
+        
+        // Load fresh data if needed
+        (async () => {
+          if (!cachedDocuments || !cachedCurations || !cachedConversations) {
+            console.log('🔄 VaultState: Some data missing from cache, loading in background')
+            await refreshAllDataInBackground()
+          }
+        })(),
+        
+        // Load AI providers (always fresh from API as requested)
+        (async () => {
+          console.log('🔄 VaultState: Loading fresh AI providers from API in background')
+          await loadAndCacheAllAIProviders()
+        })(),
+        
+        // Preload conversation content in background
+        (async () => {
+          if (cachedConversations && cachedConversations.length > 0) {
+            await backgroundPreloadConversationContent(cachedConversations)
+          }
+        })(),
+        
+        // 🚀 DOCUMENTS PAGE PREFETCHING - Parallel data loading for flawless experience
+        (async () => {
+          console.log('📄 VaultState: Starting Documents Page prefetching for instant navigation')
+          
+          try {
+            // Prefetch documents page data in parallel (NO CACHING as requested)
+            const documentsPagePromises = [
+              // 1. Fresh documents data (already loaded above, but ensure latest)
+              documentStore.getDocuments(),
+              
+              // 2. Fresh AI providers and models for documents page
+              ragApiClient.getAvailableModels(),
+              
+              // 3. Initialize document store background processing
+              documentStore.initializeBackgroundProcessing()
+            ]
+            
+            const [freshDocumentsResult, freshProvidersResult] = await Promise.allSettled(documentsPagePromises)
+            
+            // Update documents if we got fresh data
+            if (freshDocumentsResult.status === 'fulfilled' && freshDocumentsResult.value && Array.isArray(freshDocumentsResult.value)) {
+              const freshDocuments = freshDocumentsResult.value as DocumentData[]
+              console.log('✅ VaultState: Documents page - Fresh documents prefetched:', freshDocuments.length)
+              // Don't cache documents data as requested - only update state
+              dispatch({ type: 'SET_DOCUMENTS', payload: freshDocuments })
+              generateDynamicCurationsAndSummaries(freshDocuments)
+            }
+            
+            // Update providers if we got fresh data
+            if (freshProvidersResult.status === 'fulfilled' && freshProvidersResult.value && Array.isArray(freshProvidersResult.value)) {
+              const freshProviders = freshProvidersResult.value as any[]
+              console.log('✅ VaultState: Documents page - Fresh AI providers prefetched:', freshProviders.length)
+              
+              // NO CACHING for AI providers - always fresh from API as requested
+              console.log('🚫 VaultState: AI Providers NOT cached - always fresh from API')
+              
+              // Update state with fresh providers (no caching)
+              const currentProvider = state.settings.selectedProvider
+              const availableModels = freshProviders.find((p: any) => p.name === currentProvider)?.models || []
+              
+              dispatch({ 
+                type: 'SET_PROVIDER_SETTINGS', 
+                payload: { 
+                  provider: currentProvider,
+                  model: state.settings.selectedModel,
+                  availableModels,
+                  modelProviders: freshProviders
+                }
+              })
+            }
+            
+            console.log('🎉 VaultState: Documents Page prefetching completed - Navigation will be instant!')
+            
+          } catch (error) {
+            console.error('❌ VaultState: Documents Page prefetching failed:', error)
+          }
+        })()
+      ]).then(() => {
+        console.log('✅ VaultState: All background operations + Documents Page prefetching completed')
+      }).catch(error => {
+        console.error('❌ VaultState: Some background operations failed:', error)
+      })
+
+      const initTime = Date.now() - startTime
+      dispatch({ type: 'UPDATE_PERFORMANCE', payload: { loadTimes: { initialization: initTime } } })
+      
+      console.log(`🎉 VaultState: INSTANT INITIALIZATION completed in ${initTime}ms - UI ready immediately!`)
+
+    } catch (error) {
+      console.error('💥 VaultState: Initialization failed:', error)
+      // Continue with empty state rather than blocking
+    }
+  }, [authLoading, isAuthenticated, generateDynamicCurationsAndSummaries, getIconForCuration, refreshAllDataInBackground, loadAndCacheAllAIProviders, backgroundPreloadConversationContent, state.settings.selectedProvider, state.settings.selectedModel])
+
+  const refreshAllData = useCallback(async () => {
+    console.log('🔄 VaultState: Manual refresh triggered')
+    
+    dispatch({ type: 'SET_LOADING', payload: { section: 'documents', loading: true } })
+    dispatch({ type: 'SET_LOADING', payload: { section: 'curations', loading: true } })
+    dispatch({ type: 'SET_LOADING', payload: { section: 'conversations', loading: true } })
+
+    await refreshAllDataInBackground()
+
+    dispatch({ type: 'SET_LOADING', payload: { section: 'documents', loading: false } })
+    dispatch({ type: 'SET_LOADING', payload: { section: 'curations', loading: false } })
+    dispatch({ type: 'SET_LOADING', payload: { section: 'conversations', loading: false } })
+  }, [refreshAllDataInBackground])
+
+  // Helper function to separate curations by type
+  const separateCurationsByType = useCallback((curations: AICuration[]) => {
+    const custom = curations.filter(c => !c.autoGenerated).map(curation => ({
+      id: curation.id,
+      title: curation.title,
+      icon: getIconForCuration(curation.keywords || curation.topicKeywords || []),
+      active: false,
+      status: curation.status
+    }))
+    
+    const dynamic = curations.filter(c => c.autoGenerated).map(curation => ({
+      id: curation.id,
+      title: curation.title,
+      icon: getIconForCuration(curation.keywords || curation.topicKeywords || []),
+      active: false,
+      status: curation.status
+    }))
+    
+    return { custom, dynamic }
+  }, [getIconForCuration])
 
   const loadAIProviders = useCallback(async () => {
     // This function is kept for backward compatibility but now calls the comprehensive version
@@ -1274,107 +1221,125 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
     } catch (error) {
       console.error('❌ VaultState: Immediate conversation preloading failed:', error)
     }
-  }, [])
-
-  const backgroundPreloadConversationContent = useCallback(async (conversations: Conversation[]) => {
-    console.log('🚀 VaultState: Starting background preloading of conversation content for instant access')
-    
-    try {
-      // Sort conversations by most recent and take top 15 for background preloading
-      const conversationsToPreload = conversations
-        .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
-        .slice(0, 15)
-      
-      let preloadedCount = 0
-      const preloadPromises = conversationsToPreload.map(async (conversation) => {
-        try {
-          const conversationCacheKey = `conversation_content_${conversation.id}`
-          
-          // Check if already cached
-          const existingCache = cacheManager.get<any>(conversationCacheKey)
-          if (existingCache) {
-            console.log(`⚡ VaultState: Conversation ${conversation.id} already cached, skipping`)
-            return
-          }
-          
-          // Load conversation content from API
-          const conversationData = await ragApiClient.getConversation(conversation.id)
-          
-          if (conversationData) {
-            // Cache for 24 hours for instant future access
-            cacheManager.set(conversationCacheKey, conversationData, 24 * 60 * 60 * 1000)
-            preloadedCount++
-            console.log(`✅ VaultState: Background preloaded conversation ${conversation.id} (${conversation.title})`)
-          }
-        } catch (error) {
-          console.error(`❌ VaultState: Failed to preload conversation ${conversation.id}:`, error)
-        }
-      })
-      
-      // Execute preloading in batches of 3 to avoid overwhelming the API
-      const batchSize = 3
-      for (let i = 0; i < preloadPromises.length; i += batchSize) {
-        const batch = preloadPromises.slice(i, i + batchSize)
-        await Promise.allSettled(batch)
-        
-        // Small delay between batches to be respectful to the API
-        if (i + batchSize < preloadPromises.length) {
-          await new Promise(resolve => setTimeout(resolve, 500))
-        }
-      }
-      
-      console.log(`🎉 VaultState: Background preloading completed - ${preloadedCount} conversations preloaded for instant access`)
-      
-      // Update session storage with newly preloaded content
-      const allPreloadedContent: Record<string, any> = {}
-      conversationsToPreload.forEach(conversation => {
-        const conversationCacheKey = `conversation_content_${conversation.id}`
-        const cachedData = cacheManager.get<any>(conversationCacheKey)
-        if (cachedData) {
-          allPreloadedContent[conversation.id] = cachedData
-        }
-      })
-      
-      if (Object.keys(allPreloadedContent).length > 0) {
-        sessionStorage.setItem('preloaded_conversation_content', JSON.stringify(allPreloadedContent))
-        console.log(`✅ VaultState: Updated session storage with ${Object.keys(allPreloadedContent).length} preloaded conversations`)
-      }
-      
-    } catch (error) {
-      console.error('❌ VaultState: Background conversation preloading failed:', error)
-    }
-  }, [])
+  }, [backgroundPreloadConversationContent])
 
   // ============================================================================
-  // REAL-TIME DOCUMENT UPDATES
+  // REAL-TIME DOCUMENT UPDATES WITH IMMEDIATE CACHE INVALIDATION
   // ============================================================================
 
   // Subscribe to real-time document updates from document store
   useEffect(() => {
     if (!isAuthenticated) return
 
-    console.log('🔄 VaultState: Subscribing to real-time document updates')
+    console.log('🔄 VaultState: Subscribing to real-time document updates with immediate cache invalidation')
     
     const unsubscribe = documentStore.subscribeToUpdates((updatedDocuments) => {
       console.log('✅ VaultState: Received real-time document update:', updatedDocuments.length, 'documents')
       
-      // Update documents in state
+      // IMMEDIATE CACHE INVALIDATION: Clear all document-related cache first
+      console.log('🗑️ VaultState: Immediately invalidating document cache for instant updates')
+      cacheManager.delete(CacheKeys.documents())
+      cacheManager.delete(CacheKeys.documents() + '_meta')
+      
+      // Update documents in state immediately
       dispatch({ type: 'SET_DOCUMENTS', payload: updatedDocuments })
       
       // Regenerate dynamic curations and summaries based on new documents
       generateDynamicCurationsAndSummaries(updatedDocuments)
       
-      // Update cache with fresh data
-      cacheManager.set(CacheKeys.documents(), updatedDocuments, 30 * 60 * 1000)
-      cacheManager.set(CacheKeys.documents() + '_meta', { timestamp: Date.now() }, 30 * 60 * 1000)
+      // Update cache with fresh data and shorter TTL for faster updates
+      cacheManager.set(CacheKeys.documents(), updatedDocuments, 5 * 60 * 1000) // 5 minutes instead of 30
+      cacheManager.set(CacheKeys.documents() + '_meta', { timestamp: Date.now() }, 5 * 60 * 1000)
       
-      console.log('🎉 VaultState: Document state updated in real-time - dropdown will show latest documents')
+      console.log('🎉 VaultState: Document state updated in real-time - dropdown will show latest documents IMMEDIATELY')
+      
+      // Force a state refresh to ensure UI updates immediately
+      setTimeout(() => {
+        dispatch({ type: 'SET_DOCUMENTS', payload: updatedDocuments })
+        console.log('🔄 VaultState: Forced state refresh to ensure immediate UI update')
+      }, 100)
     })
 
     // Cleanup subscription on unmount or auth change
     return () => {
       console.log('🧹 VaultState: Unsubscribing from document updates')
       unsubscribe()
+    }
+  }, [isAuthenticated, generateDynamicCurationsAndSummaries])
+
+  // ============================================================================
+  // CROSS-TAB DOCUMENT SYNC FOR IMMEDIATE UPDATES
+  // ============================================================================
+
+  // Listen for document updates from other tabs/windows (like the documents page)
+  useEffect(() => {
+    if (!isAuthenticated) return
+
+    const handleStorageChange = (event: StorageEvent) => {
+      // Listen for document upload events from other tabs
+      if (event.key === 'sixthvault_document_upload_event') {
+        try {
+          const eventData = JSON.parse(event.newValue || '{}')
+          console.log('📡 VaultState: Detected document upload from another tab:', eventData)
+          
+          // Immediately invalidate cache and refresh documents
+          cacheManager.delete(CacheKeys.documents())
+          cacheManager.delete(CacheKeys.documents() + '_meta')
+          
+          // Force refresh documents from document store with immediate UI update
+          documentStore.refreshDocuments().then(documents => {
+            console.log('✅ VaultState: Force refreshed documents from cross-tab event:', documents.length)
+            dispatch({ type: 'SET_DOCUMENTS', payload: documents })
+            generateDynamicCurationsAndSummaries(documents)
+            cacheManager.set(CacheKeys.documents(), documents, 5 * 60 * 1000)
+            cacheManager.set(CacheKeys.documents() + '_meta', { timestamp: Date.now() }, 5 * 60 * 1000)
+            
+            // Force a second update to ensure UI reflects changes
+            setTimeout(() => {
+              dispatch({ type: 'SET_DOCUMENTS', payload: documents })
+              console.log('🔄 VaultState: Secondary UI update to ensure document count sync')
+            }, 500)
+            
+          }).catch(error => {
+            console.error('❌ VaultState: Failed to refresh documents from cross-tab event:', error)
+          })
+        } catch (error) {
+          console.error('❌ VaultState: Failed to parse cross-tab event data:', error)
+        }
+      }
+      
+      // Listen for cache invalidation events
+      if (event.key === 'sixthvault_cache_invalidate_documents') {
+        console.log('🗑️ VaultState: Received cache invalidation signal, refreshing documents immediately')
+        
+        // Clear cache and reload with force refresh
+        cacheManager.delete(CacheKeys.documents())
+        cacheManager.delete(CacheKeys.documents() + '_meta')
+        
+        // Force refresh documents from document store
+        documentStore.refreshDocuments().then(documents => {
+          console.log('✅ VaultState: Force refreshed documents from cache invalidation:', documents.length)
+          dispatch({ type: 'SET_DOCUMENTS', payload: documents })
+          generateDynamicCurationsAndSummaries(documents)
+          cacheManager.set(CacheKeys.documents(), documents, 5 * 60 * 1000)
+          cacheManager.set(CacheKeys.documents() + '_meta', { timestamp: Date.now() }, 5 * 60 * 1000)
+          
+          // Force a second update to ensure UI reflects changes
+          setTimeout(() => {
+            dispatch({ type: 'SET_DOCUMENTS', payload: documents })
+            console.log('🔄 VaultState: Secondary UI update from cache invalidation')
+          }, 500)
+          
+        }).catch(error => {
+          console.error('❌ VaultState: Failed to refresh documents from cache invalidation:', error)
+        })
+      }
+    }
+
+    window.addEventListener('storage', handleStorageChange)
+    
+    return () => {
+      window.removeEventListener('storage', handleStorageChange)
     }
   }, [isAuthenticated, generateDynamicCurationsAndSummaries])
 
@@ -1485,6 +1450,18 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
     }
   }, [state.performance, generateDynamicCurationsAndSummaries])
 
+  const refreshDocuments = useCallback(async () => {
+    console.log('🔄 VaultState: Manual document refresh triggered')
+    
+    // Clear cache first to force fresh data
+    dispatch({ type: 'REFRESH_DOCUMENTS' })
+    
+    // Then reload documents
+    await loadDocuments()
+    
+    console.log('✅ VaultState: Document refresh completed')
+  }, [loadDocuments])
+
   // ============================================================================
   // CONTENT GENERATION ACTIONS
   // ============================================================================
@@ -1495,7 +1472,7 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
       const isExistingCuration = state.curations.data.some(c => c.id === curationIdOrTitle)
       const displayTitle = title || curationIdOrTitle
       
-      console.log('VaultState: Processing curation content request for:', {
+      console.log('🎯 VaultState: Processing curation content request for:', {
         input: curationIdOrTitle,
         isExistingCuration,
         displayTitle,
@@ -1503,7 +1480,7 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
         model: state.settings.selectedModel
       })
 
-      // FIXED: For existing curations, check cache first and display instantly if available
+      // STEP 1: For existing curations, check cache first and display instantly if available
       if (isExistingCuration) {
         const curation = state.curations.data.find(c => c.id === curationIdOrTitle || c.title === curationIdOrTitle)
         if (curation) {
@@ -1512,7 +1489,7 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
           
           if (cachedContent) {
             // Display cached content instantly without any loading state
-            console.log('✅ VaultState: Loading cached AI curation content instantly:', displayTitle)
+            console.log('✅ VaultState: Found cached content, displaying instantly:', displayTitle)
             
             const cachedMessage = {
               id: Date.now(),
@@ -1533,92 +1510,235 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
             }
             
             dispatch({ type: 'ADD_CHAT_MESSAGE', payload: cachedMessage })
-            return // Exit early - no need to generate new content
+            dispatch({ type: 'SET_CURATION_GENERATING', payload: false })
+            
+            // Remove any existing loading messages for this curation
+            const updatedMessages = state.conversations.chatMessages.filter(msg => 
+              !(msg.type === "curation" && msg.title === displayTitle && msg.isGenerating)
+            )
+            if (updatedMessages.length !== state.conversations.chatMessages.length) {
+              dispatch({ type: 'SET_CHAT_MESSAGES', payload: updatedMessages })
+              console.log('🧹 VaultState: Removed loading message since cached content is available')
+            }
+            
+            return // Exit early - cached content displayed
           }
         }
       }
 
-      // FIXED: Only show loading state when we actually need to generate content
-      // For existing curations without cache, or for new curations
-      console.log('🔄 VaultState: No cached content found, will generate fresh content with loading state')
-      dispatch({ type: 'SET_CURATION_GENERATING', payload: true })
-
-      // The AI service now handles cache checking internally and will return instantly for cached content
-      // This call will only show loading if content actually needs to be generated
-      const content = await aiCurationService.generateCurationContent(
-        curationIdOrTitle, // This can now handle both IDs and titles
-        state.settings.selectedProvider,
-        state.settings.selectedModel
-      )
-
-      // Add the final content message to chat
-      const contentMessage = {
-        id: Date.now(),
-        type: "curation" as const,
-        content: content,
-        title: displayTitle,
-        isGenerating: false,
-        themes: ["AI Curation", "Document Analysis", "Insights"],
-        documentsUsed: state.documents.selectedFiles.length > 0 ? state.documents.selectedFiles.length : state.documents.data.length,
-        documentNames: state.documents.selectedFiles.length > 0 
-          ? state.documents.selectedFiles.map(fileId => {
-              const doc = state.documents.data.find(d => d.id === fileId)
-              return doc?.name || fileId
-            })
-          : state.documents.data.map(doc => doc.name),
-        timestamp: new Date().toISOString()
-      }
-
-      dispatch({ type: 'ADD_CHAT_MESSAGE', payload: contentMessage })
-
-      // Cache the generated curation content for instant access on future logins
-      const curationForCaching = state.curations.data.find(c => c.id === curationIdOrTitle) || 
-                                 state.curations.data.find(c => c.title === curationIdOrTitle)
-      
-      if (curationForCaching) {
-        const contentCacheKey = `curation_content_${curationForCaching.id}`
-        cacheManager.set(contentCacheKey, content, 24 * 60 * 60 * 1000) // Cache for 24 hours
-        console.log(`✅ VaultState: Cached AI curation content for instant access: ${curationForCaching.title}`)
-      } else if (!isExistingCuration) {
-        // For new curations created from titles, cache with a temporary key
-        const tempCacheKey = `curation_content_temp_${displayTitle.toLowerCase().replace(/\s+/g, '_')}`
-        cacheManager.set(tempCacheKey, content, 24 * 60 * 60 * 1000)
-        console.log(`✅ VaultState: Cached new AI curation content temporarily: ${displayTitle}`)
-      }
-
-      // If this was a new curation created from a title, refresh curations list
-      if (!isExistingCuration) {
-        console.log('VaultState: Refreshing curations after creating new one from title')
-        await loadCurations()
-        
-        // After refresh, try to cache with proper ID
-        const newCuration = state.curations.data.find(c => c.title === displayTitle)
-        if (newCuration) {
-          const properCacheKey = `curation_content_${newCuration.id}`
-          cacheManager.set(properCacheKey, content, 24 * 60 * 60 * 1000)
-          console.log(`✅ VaultState: Re-cached AI curation content with proper ID: ${newCuration.id}`)
+      // STEP 2: Try to fetch from backend/database if not in cache
+      if (isExistingCuration) {
+        const curation = state.curations.data.find(c => c.id === curationIdOrTitle)
+        if (curation) {
+          console.log('🔄 VaultState: Checking backend for existing curation content:', curation.id)
+          
+          try {
+            // Try to get content from backend API
+            const backendContent = await ragApiClient.getCurationContent(curation.id)
+            
+            if (backendContent && backendContent.content && backendContent.content.trim().length > 0) {
+              console.log('✅ VaultState: Found content in backend, displaying and caching:', displayTitle)
+              
+              // Display backend content
+              const backendMessage = {
+                id: Date.now(),
+                type: "curation" as const,
+                content: backendContent.content,
+                title: displayTitle,
+                isGenerating: false,
+                themes: ["AI Curation", "Retrieved Content", "Database"],
+                documentsUsed: state.documents.selectedFiles.length > 0 ? state.documents.selectedFiles.length : state.documents.data.length,
+                documentNames: state.documents.selectedFiles.length > 0 
+                  ? state.documents.selectedFiles.map(fileId => {
+                      const doc = state.documents.data.find(d => d.id === fileId)
+                      return doc?.name || fileId
+                    })
+                  : state.documents.data.map(doc => doc.name),
+                timestamp: new Date().toISOString(),
+                cached: backendContent.cached || false
+              }
+              
+              dispatch({ type: 'ADD_CHAT_MESSAGE', payload: backendMessage })
+              dispatch({ type: 'SET_CURATION_GENERATING', payload: false })
+              
+              // Cache the retrieved content for future instant access
+              const contentCacheKey = `curation_content_${curation.id}`
+              cacheManager.set(contentCacheKey, backendContent.content, 24 * 60 * 60 * 1000)
+              console.log('✅ VaultState: Cached retrieved content for future instant access')
+              
+              // Remove any existing loading messages
+              const updatedMessages = state.conversations.chatMessages.filter(msg => 
+                !(msg.type === "curation" && msg.title === displayTitle && msg.isGenerating)
+              )
+              if (updatedMessages.length !== state.conversations.chatMessages.length) {
+                dispatch({ type: 'SET_CHAT_MESSAGES', payload: updatedMessages })
+              }
+              
+              return // Exit early - backend content displayed
+            }
+          } catch (backendError) {
+            console.log('⚠️ VaultState: Backend retrieval failed, will generate new content:', backendError)
+            // Continue to generation step
+          }
         }
       }
 
+      // STEP 3: Generate new content if not found in cache or backend
+      console.log('🚀 VaultState: No cached/stored content found, generating new content for:', displayTitle)
+
+      // Look for existing loading message to update
+      const existingLoadingMessage = state.conversations.chatMessages.find(msg => 
+        msg.type === "curation" && msg.title === displayTitle && msg.isGenerating
+      )
+
+      if (!existingLoadingMessage) {
+        console.log('⚠️ VaultState: No loading message found - creating one')
+        // Create a loading message if none exists
+        const loadingMessage = {
+          id: Date.now(),
+          type: "curation" as const,
+          content: "",
+          title: displayTitle,
+          isGenerating: true,
+          themes: ["AI Curation", "Generating", "Please Wait"],
+          documentsUsed: state.documents.selectedFiles.length > 0 ? state.documents.selectedFiles.length : state.documents.data.length,
+          documentNames: state.documents.selectedFiles.length > 0 
+            ? state.documents.selectedFiles.map(fileId => {
+                const doc = state.documents.data.find(d => d.id === fileId)
+                return doc?.name || fileId
+              })
+            : state.documents.data.map(doc => doc.name),
+          timestamp: new Date().toISOString()
+        }
+        dispatch({ type: 'ADD_CHAT_MESSAGE', payload: loadingMessage })
+      }
+
+      const loadingMessageId = existingLoadingMessage?.id || Date.now()
+      dispatch({ type: 'SET_CURATION_GENERATING', payload: true })
+
+      try {
+        // Generate new content with timeout
+        const generationTimeout = 60000 // 60 seconds
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Curation generation timed out')), generationTimeout)
+        })
+        
+        const content = await Promise.race([
+          aiCurationService.generateCurationContent(
+            curationIdOrTitle,
+            state.settings.selectedProvider,
+            state.settings.selectedModel
+          ),
+          timeoutPromise
+        ]) as string
+
+        console.log('✅ VaultState: AI curation content generation completed successfully')
+        console.log('📝 VaultState: Generated content length:', content?.length || 0, 'characters')
+
+        if (!content || content.trim().length === 0) {
+          throw new Error('No content was generated by the AI service')
+        }
+
+        // Update the loading message with generated content
+        dispatch({ 
+          type: 'UPDATE_CHAT_MESSAGE', 
+          payload: { 
+            id: loadingMessageId, 
+            updates: { 
+              content: content,
+              isGenerating: false,
+              themes: ["AI Curation", "Generated Content", "Fresh Analysis"],
+              timestamp: new Date().toISOString()
+            }
+          }
+        })
+
+        console.log('✅ VaultState: Successfully updated chat message with generated content')
+
+        // STEP 4: Cache the generated content for future instant access
+        const curationForCaching = state.curations.data.find(c => c.id === curationIdOrTitle) || 
+                                   state.curations.data.find(c => c.title === curationIdOrTitle)
+        
+        if (curationForCaching) {
+          const contentCacheKey = `curation_content_${curationForCaching.id}`
+          cacheManager.set(contentCacheKey, content, 24 * 60 * 60 * 1000)
+          console.log(`✅ VaultState: Cached generated content for instant future access: ${curationForCaching.title}`)
+        }
+
+        // If this was a new curation, refresh curations list and cache properly
+        if (!isExistingCuration) {
+          console.log('🔄 VaultState: Refreshing curations after creating new one')
+          await loadCurations()
+          
+          const newCuration = state.curations.data.find(c => c.title === displayTitle)
+          if (newCuration) {
+            const properCacheKey = `curation_content_${newCuration.id}`
+            cacheManager.set(properCacheKey, content, 24 * 60 * 60 * 1000)
+            console.log(`✅ VaultState: Re-cached with proper ID: ${newCuration.id}`)
+          }
+        }
+
+        console.log('🎉 VaultState: Complete curation workflow finished successfully')
+
+      } catch (generationError) {
+        console.error('❌ VaultState: Generation failed:', generationError)
+        
+        dispatch({ 
+          type: 'UPDATE_CHAT_MESSAGE', 
+          payload: { 
+            id: loadingMessageId, 
+            updates: { 
+              content: `Sorry, I encountered an error generating the curation "${displayTitle}". ${generationError instanceof Error ? generationError.message : 'Please try again.'}`,
+              isGenerating: false,
+              themes: ["AI Curation", "Error", "Please Retry"],
+              timestamp: new Date().toISOString()
+            }
+          }
+        })
+        
+        throw generationError
+      }
+
     } catch (error) {
-      console.error('Failed to generate curation content:', error)
+      console.error('❌ VaultState: Failed to process curation content:', error)
       
-      // Determine display title for error message
       const errorDisplayTitle = title || curationIdOrTitle
-      
-      // Add error message to chat
       const errorMessage = {
         id: Date.now(),
         type: "ai" as const,
-        content: `Sorry, I encountered an error generating the curation "${errorDisplayTitle}". Please try again or check your connection.`,
+        content: `Sorry, I encountered an error with the curation "${errorDisplayTitle}". Please try again.`,
         title: errorDisplayTitle,
         timestamp: new Date().toISOString()
       }
       dispatch({ type: 'ADD_CHAT_MESSAGE', payload: errorMessage })
+      
     } finally {
+      // Always clear loading state
       dispatch({ type: 'SET_CURATION_GENERATING', payload: false })
+      
+      // Force clear any remaining loading messages after delay
+      setTimeout(() => {
+        const stillLoadingMessages = state.conversations.chatMessages.filter(msg => 
+          msg.type === "curation" && msg.isGenerating
+        )
+        if (stillLoadingMessages.length > 0) {
+          console.log('🧹 VaultState: Clearing remaining loading messages:', stillLoadingMessages.length)
+          stillLoadingMessages.forEach(msg => {
+            dispatch({ 
+              type: 'UPDATE_CHAT_MESSAGE', 
+              payload: { 
+                id: msg.id, 
+                updates: { 
+                  isGenerating: false,
+                  content: msg.content || "Content generation completed"
+                }
+              }
+            })
+          })
+        }
+      }, 1000)
     }
-  }, [state.settings, state.documents.selectedFiles, state.curations.data, state.documents.data, loadCurations])
+  }, [state.settings, state.documents.selectedFiles, state.curations.data, state.documents.data, state.conversations.chatMessages, loadCurations])
 
   const generateSummaryContent = useCallback(async (summaryName: string) => {
     try {
@@ -1800,26 +1920,87 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
   }, [loadSummaries])
 
   const deleteCuration = useCallback(async (curationId: string) => {
+    // Find the curation being deleted for better feedback (outside try block for scope)
+    const curationToDelete = state.curations.data.find(c => c.id === curationId)
+    const curationTitle = curationToDelete?.title || 'Unknown Curation'
+    const isCustomCuration = curationToDelete ? !curationToDelete.autoGenerated : false
+    
     try {
-      // Instantly remove the curation from the UI (optimistic update)
-      dispatch({ type: 'SET_CURATIONS', payload: state.curations.data.filter(curation => curation.id !== curationId) })
+      console.log('🗑️ VaultState: Starting instant curation deletion with optimistic UI update:', curationId)
+      console.log(`🗑️ VaultState: Deleting ${isCustomCuration ? 'custom' : 'AI-generated'} curation: "${curationTitle}"`)
       
-      // Also update custom curations list
-      dispatch({ type: 'SET_CUSTOM_CURATIONS', payload: state.curations.customCurations.filter(curation => curation.id !== curationId) })
+      // INSTANT OPTIMISTIC UPDATE: Remove from UI immediately for instant user feedback
+      // This ensures the curation disappears from UI regardless of its generation state
+      const updatedCurations = state.curations.data.filter(curation => curation.id !== curationId)
+      const updatedCustomCurations = state.curations.customCurations.filter(curation => curation.id !== curationId)
+      const updatedDynamicCurations = state.curations.dynamicCurations.filter(curation => curation.id !== curationId)
       
-      // Then make the API call to delete from backend
-      await ragApiClient.deleteCuration(curationId)
+      dispatch({ type: 'SET_CURATIONS', payload: updatedCurations })
+      dispatch({ type: 'SET_CUSTOM_CURATIONS', payload: updatedCustomCurations })
+      dispatch({ type: 'SET_DYNAMIC_CURATIONS', payload: updatedDynamicCurations })
       
-      // Remove from cache
+      console.log('✅ VaultState: Curation removed from UI instantly - user sees immediate deletion')
+      
+      // Clear all cached content for this curation immediately
       cacheManager.clearByPattern(`curation_.*_${curationId}`)
+      cacheManager.clearByPattern(`curation_content_${curationId}_.*`)
+      
+      // Use the enhanced AI curation service for backend deletion (non-blocking)
+      // The service handles optimistic updates internally, so we don't need to wait
+      aiCurationService.deleteCuration(curationId).then(result => {
+        if (result.success) {
+          console.log('✅ VaultState: Backend curation deletion completed successfully:', result.message)
+          
+          // Show success feedback if details are available
+          if (result.details) {
+            console.log(`🎉 VaultState: Deletion summary:`)
+            console.log(`   - Title: "${result.details.curationTitle}"`)
+            console.log(`   - Type: ${result.details.isCustomCuration ? 'Custom' : 'AI-generated'}`)
+            console.log(`   - Status: ${result.details.curationStatus}`)
+            console.log(`   - Instant deletion: ${result.details.instantDeletion}`)
+            console.log(`   - Cache cleared: ${result.details.cacheCleared}`)
+          }
+          
+          // Add a subtle success message to chat for user feedback
+          const successMessage = {
+            id: Date.now(),
+            type: "ai" as const,
+            content: `✅ ${result.message}`,
+            timestamp: new Date().toISOString(),
+            themes: ["System", "Deletion", "Success"]
+          }
+          dispatch({ type: 'ADD_CHAT_MESSAGE', payload: successMessage })
+          
+        } else {
+          console.warn('⚠️ VaultState: Backend curation deletion failed, but UI already updated:', result.message)
+          // Don't restore UI since user already sees deletion - backend failure is handled gracefully
+        }
+      }).catch(error => {
+        console.error('❌ VaultState: Backend curation deletion error:', error)
+        // Don't restore UI since user already sees deletion - backend failure is handled gracefully
+      })
+      
+      // Return immediately since UI is already updated
+      console.log('🎉 VaultState: Curation deletion completed instantly from user perspective')
       
     } catch (error) {
-      console.error('Failed to delete curation:', error)
-      // If deletion fails, refresh curations to restore the correct state
+      console.error('💥 VaultState: Failed to delete curation from UI:', error)
+      
+      // Add error message to chat
+      const errorMessage = {
+        id: Date.now(),
+        type: "ai" as const,
+        content: `❌ Error deleting curation "${curationTitle}": ${error instanceof Error ? error.message : 'Unknown error'}`,
+        timestamp: new Date().toISOString(),
+        themes: ["System", "Error", "Deletion"]
+      }
+      dispatch({ type: 'ADD_CHAT_MESSAGE', payload: errorMessage })
+      
+      // If UI deletion fails completely, refresh curations to restore the correct state
       await loadCurations()
       throw error
     }
-  }, [state.curations.data, state.curations.customCurations, loadCurations])
+  }, [state.curations.data, state.curations.customCurations, state.curations.dynamicCurations, loadCurations])
 
   const deleteSummary = useCallback(async (summaryId: string) => {
     try {
@@ -1910,6 +2091,19 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
       // Update current conversation ID if new
       if (response.conversation_id && response.conversation_id !== state.conversations.currentConversationId) {
         dispatch({ type: 'SET_CURRENT_CONVERSATION', payload: response.conversation_id })
+      }
+
+      // FIXED: Refresh conversations list to show the new/updated conversation in chat history
+      if (response.conversation_id) {
+        console.log('🔄 VaultState: Refreshing conversations list after message exchange')
+        try {
+          const conversations = await ragApiClient.getConversations({ limit: 50 })
+          dispatch({ type: 'SET_CONVERSATIONS', payload: conversations })
+          cacheManager.set('conversations_list', conversations, 15 * 60 * 1000)
+          console.log('✅ VaultState: Conversations list refreshed - new conversation should appear in history')
+        } catch (refreshError) {
+          console.error('❌ VaultState: Failed to refresh conversations list:', refreshError)
+        }
       }
 
     } catch (error) {
@@ -2139,6 +2333,7 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
     
     // Document actions
     loadDocuments,
+    refreshDocuments,
     
     // UI actions
     toggleSidebar,

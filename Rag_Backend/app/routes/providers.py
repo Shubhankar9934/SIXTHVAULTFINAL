@@ -6,10 +6,17 @@ from app.deps import get_current_user
 from app.database import User
 from app.services.llm_factory import config, health_monitor, has_required_credentials
 import logging
+import time
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/providers", tags=["providers"])
+
+# Cache for providers data to prevent repeated processing
+_providers_cache = {}
+_cache_timestamp = 0
+CACHE_DURATION = 300  # 5 minutes cache
 
 # Response Models
 class ProviderModel(BaseModel):
@@ -65,8 +72,21 @@ def get_provider_description(provider_name: str) -> str:
 async def get_all_providers(
     current_user: User = Depends(get_current_user)
 ):
-    """Get all available LLM providers with their status and models"""
+    """Get all available LLM providers with their status and models - CACHED"""
+    global _providers_cache, _cache_timestamp
+    
     try:
+        # Check if we have valid cached data
+        current_time = time.time()
+        if (_providers_cache and 
+            _cache_timestamp and 
+            (current_time - _cache_timestamp) < CACHE_DURATION):
+            
+            logger.info(f"🚀 PROVIDERS CACHE HIT: Returning cached providers for user {current_user.id} (age: {current_time - _cache_timestamp:.1f}s)")
+            return _providers_cache
+        
+        logger.info(f"🔄 PROVIDERS CACHE MISS: Generating fresh providers data for user {current_user.id}")
+        
         providers = []
         available_count = 0
         
@@ -119,12 +139,20 @@ async def get_all_providers(
                 default_provider = provider.name
                 break
         
-        return ProviderResponse(
+        response = ProviderResponse(
             providers=providers,
             total_providers=len(providers),
             available_providers=available_count,
             default_provider=default_provider
         )
+        
+        # Cache the response
+        _providers_cache = response
+        _cache_timestamp = current_time
+        
+        logger.info(f"✅ PROVIDERS CACHED: Stored fresh providers data for {CACHE_DURATION}s (providers: {len(providers)}, available: {available_count})")
+        
+        return response
         
     except Exception as e:
         logger.error(f"Error fetching providers for user {current_user.id}: {e}")

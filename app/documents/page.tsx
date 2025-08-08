@@ -71,6 +71,7 @@ import { aiService } from "@/lib/ai-service"
 import { ragApiClient, type BackendDocument, type WebSocketMessage, type AvailableModel, type ModelProvider } from "@/lib/api-client"
 import { RouteGuard } from "@/components/route-guard"
 import { useAuth } from "@/lib/auth-context"
+import { useVaultState } from "@/lib/vault-state-provider"
 
 interface Document {
   id: string
@@ -100,6 +101,7 @@ interface Document {
 
 function DocumentsPageContent() {
   const { logout } = useAuth()
+  const { refreshDocuments } = useVaultState()
   const [activeTab, setActiveTab] = useState("dashboard")
   const [documents, setDocuments] = useState<Document[]>([])
   const [processingDocuments, setProcessingDocuments] = useState<ProcessingDocument[]>([])
@@ -549,6 +551,63 @@ function DocumentsPageContent() {
       console.log('Model preference saved:', selectedModel)
     }
   }, [selectedModel])
+
+  // Cross-tab document deletion listener
+  useEffect(() => {
+    const handleStorageChange = (event: StorageEvent) => {
+      if (event.key === 'sixthvault_document_delete_event') {
+        console.log('📡 Documents: Received cross-tab document deletion event')
+        
+        try {
+          const eventData = JSON.parse(event.newValue || '{}')
+          console.log('📡 Documents: Deletion event data:', eventData)
+          
+          // Remove the deleted document from local state immediately
+          if (eventData.documentId) {
+            setDocuments(prev => prev.filter(d => d.id !== eventData.documentId))
+            
+            // Clear selected document if it was the deleted one
+            if (selectedDocument?.id === eventData.documentId) {
+              setSelectedDocument(null)
+            }
+          }
+          
+          // Force refresh documents from backend after a short delay
+          setTimeout(() => {
+            documentStore.refreshDocuments().then(() => {
+              console.log('✅ Documents: Refreshed documents after cross-tab deletion')
+            }).catch(error => {
+              console.error('❌ Documents: Failed to refresh after cross-tab deletion:', error)
+            })
+          }, 1000)
+          
+        } catch (error) {
+          console.error('❌ Documents: Failed to parse deletion event:', error)
+        }
+      }
+      
+      // Handle cache invalidation events
+      if (event.key === 'sixthvault_cache_invalidate_documents') {
+        console.log('📡 Documents: Received cache invalidation event')
+        
+        // Clear cache and refresh documents
+        setTimeout(() => {
+          documentStore.refreshDocuments().then(() => {
+            console.log('✅ Documents: Refreshed documents after cache invalidation')
+          }).catch(error => {
+            console.error('❌ Documents: Failed to refresh after cache invalidation:', error)
+          })
+        }, 500)
+      }
+    }
+
+    // Add storage event listener
+    window.addEventListener('storage', handleStorageChange)
+
+    return () => {
+      window.removeEventListener('storage', handleStorageChange)
+    }
+  }, [selectedDocument])
 
   // FIXED: Proper integration with document store background processing
   useEffect(() => {
@@ -1091,28 +1150,37 @@ function DocumentsPageContent() {
                   isolatedTimer = null
                 }
                 
-                // Update to 100% completion with AI data
-                setDocuments((prev) => 
-                  prev.map((doc) => {
-                    if (doc.id === isolatedDocId) {
-                      const completedData = message.data || {}
-                      return {
-                        ...doc,
-                        status: "completed" as const,
-                        progress: 100,
-                        summary: completedData.summary || '',
-                        themes: completedData.themes || [],
-                        keywords: completedData.keywords || completedData.themes || [],
-                        demographics: completedData.demographics || [],
-                        mainTopics: completedData.themes || [],
-                        keyInsights: completedData.insights ? [completedData.insights] : [],
-                        language: completedData.language || 'English',
-                        statusMessage: `File ${currentFile}/${totalFiles}: Analysis complete! ✅`
-                      }
-                    }
-                    return doc
-                  })
-                )
+                        // Update to 100% completion with AI data
+                        setDocuments((prev) => 
+                          prev.map((doc) => {
+                            if (doc.id === isolatedDocId) {
+                              const completedData = message.data || {}
+                              return {
+                                ...doc,
+                                status: "completed" as const,
+                                progress: 100,
+                                summary: completedData.summary || '',
+                                themes: completedData.themes || [],
+                                keywords: completedData.keywords || completedData.themes || [],
+                                demographics: completedData.demographics || [],
+                                mainTopics: completedData.themes || [],
+                                keyInsights: completedData.insights ? [completedData.insights] : [],
+                                language: completedData.language || 'English',
+                                statusMessage: `File ${currentFile}/${totalFiles}: Processing complete`
+                              }
+                            }
+                            return doc
+                          })
+                        )
+
+                        // IMMEDIATE CROSS-TAB NOTIFICATION: Signal vault page to refresh documents immediately
+                        console.log('📡 Documents: Signaling vault page for immediate document refresh')
+                        localStorage.setItem('sixthvault_document_upload_event', Date.now().toString())
+                        localStorage.removeItem('sixthvault_document_upload_event') // Trigger storage event
+                        
+                        // Also trigger cache invalidation signal
+                        localStorage.setItem('sixthvault_cache_invalidate_documents', Date.now().toString())
+                        localStorage.removeItem('sixthvault_cache_invalidate_documents')
                 
                 isolatedProgress.value = 100
                 setTimeout(completeIsolatedFile, 600)
@@ -2288,7 +2356,10 @@ function DocumentsPageContent() {
     const documentToDelete = deleteDialog.document
     setDeleteDialog(prev => ({ ...prev, isDeleting: true }))
 
-    // OPTIMISTIC UPDATE: Immediately remove from UI for better UX
+    // INSTANT FRONTEND REMOVAL: Remove document from UI immediately for better UX
+    console.log('🚀 Documents: Instantly removing document from frontend:', documentToDelete.name)
+    
+    // Remove from local state immediately (optimistic update)
     setDocuments((prev) => prev.filter((d) => d.id !== documentToDelete.id))
     
     // Clear selected document if it's the one being deleted
@@ -2296,46 +2367,104 @@ function DocumentsPageContent() {
       setSelectedDocument(null)
     }
 
-    // Close dialog immediately to show the deletion happened
+    // Close dialog immediately
     setDeleteDialog({
       isOpen: false,
       document: null,
       isDeleting: false
     })
 
+    // IMMEDIATE CROSS-TAB NOTIFICATION: Signal all other tabs to refresh immediately
+    console.log('📡 Documents: Signaling all tabs for immediate document removal')
+    localStorage.setItem('sixthvault_document_delete_event', JSON.stringify({
+      documentId: documentToDelete.id,
+      documentName: documentToDelete.name,
+      timestamp: Date.now()
+    }))
+    localStorage.removeItem('sixthvault_document_delete_event') // Trigger storage event
+
+    // BACKGROUND DELETION: Process backend deletion in background
     try {
-      // Call backend delete API
+      console.log('🔄 Documents: Processing backend deletion in background for:', documentToDelete.name)
+      
+      // Call backend delete API in background
       const success = await ragApiClient.deleteDocument(documentToDelete.id)
       
       if (!success) {
-        throw new Error('Delete operation failed')
+        throw new Error('Backend delete operation failed')
       }
 
-      console.log('Document successfully deleted:', documentToDelete.name)
+      console.log('✅ Documents: Backend deletion successful for:', documentToDelete.name)
       
-      // Note: Backend handles all persistence automatically
-      // The optimistic update already removed it from UI
+      // CACHE INVALIDATION: Clear all document-related caches after successful backend deletion
+      console.log('🗑️ Documents: Clearing document caches after backend deletion')
+      
+      // Clear document store cache
+      if (typeof window !== 'undefined') {
+        // Use cache manager to clear document caches
+        const { cacheManager } = await import('@/lib/cache-manager')
+        cacheManager.clearDocumentCaches()
+        
+        // Clear localStorage caches
+        Object.keys(localStorage).forEach(key => {
+          if (key.includes('documents') || key.includes('vault') || key.includes('sixthvault')) {
+            localStorage.removeItem(key)
+          }
+        })
+        
+        // Clear sessionStorage caches
+        Object.keys(sessionStorage).forEach(key => {
+          if (key.includes('documents') || key.includes('vault') || key.includes('sixthvault')) {
+            sessionStorage.removeItem(key)
+          }
+        })
+      }
+      
+      // Trigger cache invalidation signal for other components
+      localStorage.setItem('sixthvault_cache_invalidate_documents', Date.now().toString())
+      localStorage.removeItem('sixthvault_cache_invalidate_documents')
+      
+      // VAULT STATE REFRESH: Call the vault state provider to refresh documents
+      try {
+        await refreshDocuments()
+        console.log('✅ Documents: Vault state refreshed after backend deletion')
+      } catch (refreshError) {
+        console.error('❌ Documents: Failed to refresh vault state:', refreshError)
+      }
+      
+      // Force refresh of document store
+      try {
+        await documentStore.refreshDocuments()
+        console.log('✅ Documents: Document store refreshed after backend deletion')
+      } catch (refreshError) {
+        console.error('❌ Documents: Failed to refresh document store:', refreshError)
+      }
       
     } catch (error) {
-      console.error('Failed to delete document:', error)
+      console.error('❌ Documents: Backend deletion failed for:', documentToDelete.name, error)
       
-      // ROLLBACK: Restore the document to UI if deletion failed
+      // ROLLBACK: Re-add document to UI if backend deletion failed
+      console.log('🔄 Documents: Rolling back frontend deletion due to backend failure')
       setDocuments((prev) => {
-        // Check if document is already back (from real-time updates)
-        const exists = prev.find(d => d.id === documentToDelete.id)
-        if (!exists) {
-          // Add it back to the list
-          return [...prev, documentToDelete].sort((a, b) => 
-            new Date(b.uploadDate).getTime() - new Date(a.uploadDate).getTime()
-          )
+        // Check if document is already back (avoid duplicates)
+        if (prev.some(d => d.id === documentToDelete.id)) {
+          return prev
         }
-        return prev
+        // Re-add the document at the beginning to make it visible
+        return [documentToDelete, ...prev]
       })
       
       // Show error message to user
-      alert(`Failed to delete "${documentToDelete.name}": ${error instanceof Error ? error.message : 'Unknown error'}`)
+      alert(`Failed to delete "${documentToDelete.name}": ${error instanceof Error ? error.message : 'Unknown error'}. The document has been restored.`)
+      
+      // Send rollback signal to other tabs
+      localStorage.setItem('sixthvault_document_delete_rollback', JSON.stringify({
+        document: documentToDelete,
+        timestamp: Date.now()
+      }))
+      localStorage.removeItem('sixthvault_document_delete_rollback')
     }
-  }, [deleteDialog.document, selectedDocument])
+  }, [deleteDialog.document, selectedDocument, refreshDocuments])
 
   // Cancel delete dialog
   const cancelDeleteDocument = useCallback(() => {

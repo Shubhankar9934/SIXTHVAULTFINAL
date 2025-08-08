@@ -30,6 +30,12 @@ from email.mime.multipart import MIMEMultipart
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
+# Add explicit OPTIONS handler for login endpoint
+@router.options("/login")
+async def login_options():
+    """Handle OPTIONS requests for login endpoint"""
+    return {"message": "OK"}
+
 async def cleanup_expired_registrations(db: Session):
     """Cleanup expired temporary registrations"""
     try:
@@ -890,34 +896,18 @@ async def pre_cache_conversation_content(conversations: list, user_id: str, db: 
         print(f"❌ PRE-CACHE: Failed to pre-cache conversation content: {e}")
 
 async def pre_cache_curation_content(curations: list, user_id: str, db: Session):
-    """Pre-cache curation content for instant access"""
+    """Pre-cache curation content for instant access - DISABLED to prevent 30+ curations issue"""
     try:
-        from app.services.curation_service import curation_service
+        print(f"🚫 PRE-CACHE: Curation content pre-caching DISABLED to prevent 30+ similar curations issue")
+        print(f"   This was causing automatic generation of multiple similar curations during login")
+        print(f"   Curations will now only be generated when explicitly requested by the user")
         
-        cached_count = 0
-        for curation in curations:
-            try:
-                curation_id = curation.get('id') if isinstance(curation, dict) else getattr(curation, 'id', None)
-                if curation_id:
-                    # Pre-generate curation content with default provider using the service directly
-                    content_result = await curation_service.generate_curation_content(
-                        curation_id,
-                        user_id,
-                        db,
-                        provider="gemini",
-                        model="gemini-1.5-flash"
-                    )
-                    if content_result and content_result.get("success"):
-                        cached_count += 1
-                        print(f"   ✅ Pre-cached curation {curation_id}")
-            except Exception as e:
-                print(f"   ⚠️ Failed to pre-cache curation {curation_id}: {e}")
-                continue
-        
-        print(f"🎯 PRE-CACHE: Successfully pre-cached {cached_count} curation contents")
+        # Count existing curations without generating new ones
+        cached_count = len(curations) if curations else 0
+        print(f"🎯 PRE-CACHE: Found {cached_count} existing curations (no new generation)")
         
     except Exception as e:
-        print(f"❌ PRE-CACHE: Failed to pre-cache curation content: {e}")
+        print(f"❌ PRE-CACHE: Error in disabled curation pre-cache: {e}")
 
 # Helper functions to get data for specific user (these will be imported from respective route files)
 def get_documents_for_user(user_id: str, db: Session):
@@ -987,10 +977,10 @@ def get_conversations_for_user(user_id: str, db: Session):
         # Since get_conversations is async, we need to run it in the event loop
         try:
             loop = asyncio.get_event_loop()
-            return loop.run_until_complete(get_conversations(limit=50, current_user=user, db=db))
+            return loop.run_until_complete(get_conversations(limit=50, current_user=user))
         except RuntimeError:
             # If no event loop is running, create a new one
-            return asyncio.run(get_conversations(limit=50, current_user=user, db=db))
+            return asyncio.run(get_conversations(limit=50, current_user=user))
     except Exception as e:
         print(f"Failed to get conversations for user {user_id}: {e}")
         return []

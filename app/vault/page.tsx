@@ -108,6 +108,7 @@ function VaultPageContent() {
     createCustomCuration,
     createCustomSummary,
     deleteCuration,
+    deleteSummary,
     // Conversation actions
     sendMessage,
     loadConversationHistory,
@@ -142,6 +143,59 @@ function VaultPageContent() {
     ui: { activeTab, sidebarOpen, sidebarExpanded, expandedSources, expandedRelevance },
     settings: { selectedProvider, selectedModel, availableModels, modelProviders, keepContext, maxContext, searchTag }
   } = state
+
+  // Cross-tab document deletion listener
+  useEffect(() => {
+    const handleStorageChange = (event: StorageEvent) => {
+      if (event.key === 'sixthvault_document_delete_event') {
+        console.log('📡 Vault: Received cross-tab document deletion event')
+        
+        try {
+          const eventData = JSON.parse(event.newValue || '{}')
+          console.log('📡 Vault: Deletion event data:', eventData)
+          
+          // Force refresh documents from backend after a short delay
+          setTimeout(() => {
+            // Trigger document refresh in the vault state provider
+            dispatch({ type: 'REFRESH_DOCUMENTS' })
+            console.log('✅ Vault: Triggered document refresh after cross-tab deletion')
+          }, 1000)
+          
+        } catch (error) {
+          console.error('❌ Vault: Failed to parse deletion event:', error)
+        }
+      }
+      
+      // Handle cache invalidation events
+      if (event.key === 'sixthvault_cache_invalidate_documents') {
+        console.log('📡 Vault: Received cache invalidation event')
+        
+        // Clear cache and refresh documents
+        setTimeout(() => {
+          dispatch({ type: 'REFRESH_DOCUMENTS' })
+          console.log('✅ Vault: Triggered document refresh after cache invalidation')
+        }, 500)
+      }
+      
+      // Handle document upload events
+      if (event.key === 'sixthvault_document_upload_event') {
+        console.log('📡 Vault: Received document upload event')
+        
+        // Refresh documents to show newly uploaded documents
+        setTimeout(() => {
+          dispatch({ type: 'REFRESH_DOCUMENTS' })
+          console.log('✅ Vault: Triggered document refresh after upload')
+        }, 2000)
+      }
+    }
+
+    // Add storage event listener
+    window.addEventListener('storage', handleStorageChange)
+
+    return () => {
+      window.removeEventListener('storage', handleStorageChange)
+    }
+  }, [dispatch])
 
   // The global state provider handles all initialization automatically
   // No need for manual loading effects - everything is cached and preloaded
@@ -239,13 +293,39 @@ function VaultPageContent() {
             }
             
             dispatch({ type: 'ADD_CHAT_MESSAGE', payload: cachedMessage })
+            // FIXED: Ensure loading state is always cleared
+            dispatch({ type: 'SET_CURATION_GENERATING', payload: false })
             return // Exit early - no need to call any generation functions
           }
         }
         
-        // Only call generateCurationContent if no cached content exists
-        console.log('🔄 Vault: No cached content found, calling generation function:', curationTitle)
-        await generateCurationContent(curationTitle, curationTitle)
+        // FIXED: Only set loading state and let vault state provider handle the loading message
+        console.log('🔄 Vault: No cached content found, delegating to vault state provider:', curationTitle)
+        
+        // Check if there's already a loading message for this curation to prevent duplicates
+        const existingLoadingMessage = chatMessages.find(msg => 
+          msg.type === "curation" && 
+          msg.title === curationTitle && 
+          msg.isGenerating === true
+        )
+        
+        if (existingLoadingMessage) {
+          console.log('⚠️ Vault: Loading message already exists for this curation, skipping duplicate')
+          return
+        }
+        
+        // FIXED: Only set the global loading state - don't create loading message here
+        dispatch({ type: 'SET_CURATION_GENERATING', payload: true })
+        
+        try {
+          // Call generation function which will handle creating and updating the loading message
+          await generateCurationContent(curationTitle, curationTitle)
+        } catch (generationError) {
+          console.error('Generation function failed:', generationError)
+          // Ensure loading state is cleared even if generation fails
+          dispatch({ type: 'SET_CURATION_GENERATING', payload: false })
+          throw generationError
+        }
       } else {
         // This is a user question that should go through the chat interface in the new conversation
         console.log('Vault: Redirecting question to chat interface in new conversation:', curationTitle)
@@ -253,6 +333,24 @@ function VaultPageContent() {
       }
     } catch (error) {
       console.error('Failed to generate curation content:', error)
+      
+      // FIXED: Always clear loading state on error with multiple attempts
+      dispatch({ type: 'SET_CURATION_GENERATING', payload: false })
+      
+      // Also clear any loading messages
+      const updatedMessages = chatMessages.filter(msg => 
+        !(msg.type === "curation" && msg.title === curationTitle && msg.isGenerating)
+      )
+      dispatch({ type: 'SET_CHAT_MESSAGES', payload: updatedMessages })
+      
+      // Add error message to chat
+      const errorMessage = {
+        id: Date.now(),
+        type: "ai" as const,
+        content: `Sorry, I encountered an error generating the curation "${curationTitle}". Please try again or check your connection.`,
+        timestamp: new Date().toISOString()
+      }
+      dispatch({ type: 'ADD_CHAT_MESSAGE', payload: errorMessage })
     }
   }
 
@@ -766,6 +864,12 @@ function VaultPageContent() {
                     </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="history">
+                      <div className="flex items-center">
+                        <History className="w-4 h-4 mr-2 text-blue-600" />
+                        Chat History
+                      </div>
+                    </SelectItem>
                     <SelectItem value="curations">
                       <div className="flex items-center">
                         <Sparkles className="w-4 h-4 mr-2 text-purple-600" />
@@ -776,12 +880,6 @@ function VaultPageContent() {
                       <div className="flex items-center">
                         <Brain className="w-4 h-4 mr-2 text-emerald-600" />
                         AI Summaries
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="history">
-                      <div className="flex items-center">
-                        <History className="w-4 h-4 mr-2 text-blue-600" />
-                        Chat History
                       </div>
                     </SelectItem>
                   </SelectContent>
@@ -1370,11 +1468,34 @@ function VaultPageContent() {
                                             variant="ghost"
                                             size="sm"
                                             className="w-full justify-start text-xs h-8 text-red-600 hover:text-red-700 hover:bg-red-50"
-                                            onClick={() => {
-                                              // Use global state action to remove summary
-                                              console.log('✅ Summary removed from UI instantly:', summary.name)
-                                              // Note: For dynamic summaries, there's no backend deletion needed
-                                              // as they are generated on-the-fly based on documents
+                                            onClick={async () => {
+                                              try {
+                                                // Check if this is a custom summary with an ID that needs backend deletion
+                                                const summaryData = state.summaries.data.find(s => s.title === summary.name)
+                                                
+                                                if (summaryData && summaryData.id) {
+                                                  // This is a custom summary stored in backend - delete it properly
+                                                  console.log('🗑️ Deleting custom AI summary from backend:', summary.name)
+                                                  await deleteSummary(summaryData.id)
+                                                  console.log('✅ Custom AI summary deleted successfully:', summary.name)
+                                                } else {
+                                                  // This is a dynamic summary - just remove from UI
+                                                  console.log('✅ Dynamic summary removed from UI:', summary.name)
+                                                  const updatedSummaries = state.summaries.dynamicSummaries.filter(s => s.name !== summary.name)
+                                                  dispatch({ type: 'SET_DYNAMIC_SUMMARIES', payload: updatedSummaries })
+                                                }
+                                              } catch (error) {
+                                                console.error('Failed to delete summary:', error)
+                                                // Show error message to user
+                                                const errorMessage = {
+                                                  id: Date.now(),
+                                                  type: "ai" as const,
+                                                  content: `❌ Error deleting summary "${summary.name}": ${error instanceof Error ? error.message : 'Unknown error'}`,
+                                                  timestamp: new Date().toISOString(),
+                                                  themes: ["System", "Error", "Deletion"]
+                                                }
+                                                dispatch({ type: 'ADD_CHAT_MESSAGE', payload: errorMessage })
+                                              }
                                             }}
                                           >
                                             <X className="w-3 h-3 mr-2" />

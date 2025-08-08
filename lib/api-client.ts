@@ -160,6 +160,12 @@ export class RagApiClient {
   private hybrid: boolean
   private maxFileSize: number
   private bulkUploadThreshold: number
+  
+  // Cache for providers to prevent repeated API calls
+  private providersCache: ModelProvider[] | null = null
+  private providersCacheTimestamp: number = 0
+  private providersCachePromise: Promise<ModelProvider[]> | null = null
+  private readonly PROVIDERS_CACHE_DURATION = 5 * 60 * 1000 // 5 minutes
 
   constructor() {
     this.baseUrl = process.env.NEXT_PUBLIC_RAG_API_URL || 'https://sixth-vault.com/api'
@@ -186,6 +192,87 @@ export class RagApiClient {
     }
 
     return headers
+  }
+
+  /**
+   * Enhanced API call wrapper with automatic token validation and retry logic
+   */
+  private async makeAuthenticatedRequest(
+    url: string, 
+    options: RequestInit = {}
+  ): Promise<Response> {
+    const maxRetries = 2
+    let lastError: Error | null = null
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`🔐 API Client: Making authenticated request (attempt ${attempt}/${maxRetries}) to:`, url)
+        
+        // Get fresh auth headers for each attempt
+        const authHeaders = this.getAuthHeaders()
+        
+        // Check if we have a token
+        const hasToken = (authHeaders as Record<string, string>)['Authorization']
+        if (!hasToken) {
+          throw new Error('No authentication token available - please log in again')
+        }
+
+        console.log('🔑 API Client: Using token:', hasToken.substring(0, 20) + '...')
+
+        const response = await fetch(url, {
+          ...options,
+          headers: {
+            ...authHeaders,
+            ...options.headers
+          }
+        })
+
+        console.log(`📊 API Client: Response status: ${response.status} (attempt ${attempt})`)
+
+        // If we get a 401, the token might be expired
+        if (response.status === 401) {
+          console.warn('🚨 API Client: Received 401 Unauthorized - token may be expired')
+          
+          // On first 401, try to get a fresh token by triggering auth refresh
+          if (attempt === 1) {
+            console.log('🔄 API Client: Attempting to refresh authentication...')
+            
+            // Clear the potentially expired token
+            document.cookie = 'auth-token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'
+            
+            // Trigger a page refresh to re-authenticate
+            // This is the most reliable way to handle token expiration
+            throw new Error('Authentication expired - please refresh the page to log in again')
+          }
+        }
+
+        // Return the response for successful calls or other error codes
+        return response
+
+      } catch (error) {
+        lastError = error as Error
+        console.error(`❌ API Client: Attempt ${attempt} failed:`, error)
+        
+        // Don't retry authentication errors or network errors
+        if (error instanceof Error) {
+          if (error.message.includes('Authentication expired') || 
+              error.message.includes('No authentication token') ||
+              error.message.includes('Failed to fetch') ||
+              error.message.includes('Network request failed')) {
+            throw error
+          }
+        }
+        
+        // Wait before retrying (exponential backoff)
+        if (attempt < maxRetries) {
+          const delay = Math.pow(2, attempt) * 1000
+          console.log(`⏳ API Client: Waiting ${delay}ms before retry...`)
+          await new Promise(resolve => setTimeout(resolve, delay))
+        }
+      }
+    }
+
+    throw lastError || new Error('All retry attempts failed')
   }
 
   /**
@@ -749,12 +836,53 @@ export class RagApiClient {
   }
 
   /**
-   * Get available models - Enhanced Multi-Provider Support with Better Error Handling
+   * Get available models - Enhanced Multi-Provider Support with Better Error Handling and CACHING
    */
   async getAvailableModels(): Promise<ModelProvider[]> {
-    console.log('🔍 API Client: Starting getAvailableModels() - Enhanced Multi-Provider Mode')
+    console.log('🔍 API Client: Starting getAvailableModels() - Enhanced Multi-Provider Mode with Caching')
     console.log('🌐 API Client: Base URL:', this.baseUrl)
     
+    // Check cache first
+    const currentTime = Date.now()
+    if (this.providersCache && 
+        this.providersCacheTimestamp && 
+        (currentTime - this.providersCacheTimestamp) < this.PROVIDERS_CACHE_DURATION) {
+      
+      console.log(`🚀 API CLIENT CACHE HIT: Returning cached providers (age: ${(currentTime - this.providersCacheTimestamp) / 1000}s)`)
+      return this.providersCache
+    }
+    
+    // If there's already a request in progress, wait for it
+    if (this.providersCachePromise) {
+      console.log('🔄 API CLIENT: Providers request already in progress, waiting for result...')
+      return this.providersCachePromise
+    }
+    
+    console.log('🔄 API CLIENT CACHE MISS: Fetching fresh providers data')
+    
+    // Create a new promise for this request
+    this.providersCachePromise = this.fetchProvidersFromAPI()
+    
+    try {
+      const result = await this.providersCachePromise
+      
+      // Cache the result
+      this.providersCache = result
+      this.providersCacheTimestamp = currentTime
+      
+      console.log(`✅ API CLIENT: Cached ${result.length} providers for ${this.PROVIDERS_CACHE_DURATION / 1000}s`)
+      
+      return result
+    } finally {
+      // Clear the promise so future calls can make new requests
+      this.providersCachePromise = null
+    }
+  }
+
+  /**
+   * Internal method to fetch providers from API
+   */
+  private async fetchProvidersFromAPI(): Promise<ModelProvider[]> {
     try {
       // Enhanced request with better headers and error handling
       console.log('🚀 API Client: Attempting to fetch all providers from:', `${this.baseUrl}/providers/all`)
@@ -1237,31 +1365,45 @@ export class RagApiClient {
     model: string = "gemini-1.5-flash"
   ): Promise<{ success: boolean; content?: string; message: string; cached?: boolean }> {
     try {
-      console.log('API Client: Getting curation content for:', curationId)
+      console.log('🔍 API Client: Getting curation content for:', curationId, 'with provider:', provider, 'model:', model)
       
-      const response = await fetch(`${this.baseUrl}/curations/${curationId}/content?provider=${provider}&model=${model}`, {
-        method: 'GET',
-        headers: {
-          ...this.getAuthHeaders(),
-          'Content-Type': 'application/json',
-          'ngrok-skip-browser-warning': 'true'
+      const response = await this.makeAuthenticatedRequest(
+        `${this.baseUrl}/curations/${curationId}/content?provider=${provider}&model=${model}`,
+        {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'ngrok-skip-browser-warning': 'true'
+          }
         }
-      })
+      )
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}))
+        console.error('❌ API Client: Curation content request failed:', response.status, errorData)
         throw new Error(errorData.detail || `Failed to get curation content: ${response.status}`)
       }
 
       const result = await response.json()
-      console.log('API Client: Curation content result:', {
+      console.log('✅ API Client: Curation content result:', {
         success: result.success,
         cached: result.cached,
-        contentLength: result.content?.length || 0
+        contentLength: result.content?.length || 0,
+        message: result.message
       })
       return result
     } catch (error) {
-      console.error('API Client: Failed to get curation content:', error)
+      console.error('💥 API Client: Failed to get curation content:', error)
+      
+      // Handle authentication errors specifically
+      if (error instanceof Error && error.message.includes('Authentication expired')) {
+        return {
+          success: false,
+          message: 'Your session has expired. Please refresh the page to log in again.',
+          cached: false
+        }
+      }
+      
       return {
         success: false,
         message: error instanceof Error ? error.message : 'Unknown error occurred',

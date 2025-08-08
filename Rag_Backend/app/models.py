@@ -43,6 +43,7 @@ class AICuration(SQLModel, table=True):
     content_generated: bool = Field(default=False)  # Track if content has been generated
     provider_used: Optional[str] = None  # Track which AI provider was used
     model_used: Optional[str] = None  # Track which model was used
+    curation_type: Optional[str] = None  # executive_summary, market_analysis, business_intelligence, recommendations, custom
 
 class CurationSettings(SQLModel, table=True):
     __tablename__ = "curation_settings"
@@ -53,7 +54,7 @@ class CurationSettings(SQLModel, table=True):
     on_add: str = Field(default="incremental")  # full, incremental, manual
     on_delete: str = Field(default="auto_clean")  # auto_clean, keep_stale, prompt
     change_threshold: int = Field(default=15)  # % docs changed before auto-update
-    max_curations: int = Field(default=8)
+    max_curations: int = Field(default=4)
     min_documents_per_curation: int = Field(default=2)
     created_at: dt.datetime = Field(default_factory=dt.datetime.utcnow)
     updated_at: dt.datetime = Field(default_factory=dt.datetime.utcnow)

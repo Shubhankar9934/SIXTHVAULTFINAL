@@ -181,7 +181,9 @@ async def get_conversations(
             logger.info("Unauthenticated request to conversations endpoint, returning empty list")
             return []
         
-        logger.info(f"Fetching conversations for user {current_user.id}")
+        # FIXED: Parameters are already the correct types from FastAPI Query validation
+        # No need to convert them again - this was causing the TypeError
+        logger.info(f"Fetching conversations for user {current_user.id} with limit={limit}, offset={offset}")
         conversations = conversation_service.get_user_conversations(
             user_id=current_user.id,
             tenant_id=current_user.tenant_id,
@@ -196,6 +198,8 @@ async def get_conversations(
         
     except Exception as e:
         logger.error(f"Error fetching conversations: {e}")
+        logger.error(f"Error type: {type(e)}")
+        logger.error(f"Error args: {e.args}")
         # Return empty list instead of raising exception for better UX
         return []
 
@@ -208,6 +212,10 @@ async def get_conversation(
 ):
     """Get a specific conversation with its messages"""
     try:
+        # Ensure parameters are properly converted to expected types
+        limit_value = int(message_limit) if message_limit is not None else 100
+        offset_value = int(message_offset) if message_offset is not None else 0
+        
         # Get conversation
         conversation = conversation_service.get_conversation_by_id(
             conversation_id=conversation_id,
@@ -223,8 +231,8 @@ async def get_conversation(
             conversation_id=conversation_id,
             user_id=current_user.id,
             tenant_id=current_user.tenant_id,
-            limit=message_limit,
-            offset=message_offset
+            limit=limit_value,
+            offset=offset_value
         )
         
         return ConversationWithMessagesResponse(
@@ -339,11 +347,14 @@ async def search_conversations(
 ):
     """Search conversations by content"""
     try:
+        # Ensure parameters are properly converted to expected types
+        limit_value = int(limit) if limit is not None else 20
+        
         results = conversation_service.search_conversations(
             user_id=current_user.id,
             tenant_id=current_user.tenant_id,
             query=q,
-            limit=limit
+            limit=limit_value
         )
         
         search_results = []
@@ -418,10 +429,13 @@ async def cleanup_old_conversations(
 ):
     """Archive old conversations based on age"""
     try:
+        # Ensure parameters are properly converted to expected types
+        days_old_value = int(days_old) if days_old is not None else 30
+        
         count = conversation_service.cleanup_old_conversations(
             user_id=current_user.id,
             tenant_id=current_user.tenant_id,
-            days_old=days_old
+            days_old=days_old_value
         )
         
         logger.info(f"Archived {count} old conversations for user {current_user.id}")

@@ -32,37 +32,49 @@ class CurationEngine:
         self, 
         documents: List[Document], 
         user_id: str,
-        max_curations: int = 8,
+        max_curations: int = 4,
         min_docs_per_curation: int = 2
     ) -> List[Dict]:
         """
-        Generate AI curations from a collection of documents
-        Uses a combination of keyword clustering and semantic analysis
+        Generate AI curations from documents using intelligent clustering and analysis
         """
+        logger.info(f"🎯 AUTO-GENERATED CURATION ENGINE: Starting curation generation for user {user_id}")
+        logger.info(f"📊 Processing {len(documents)} documents with max_curations={max_curations}")
+        
         if not documents:
+            logger.warning(f"No documents provided for user {user_id}")
             return []
         
-        logger.info(f"Generating curations for {len(documents)} documents (user: {user_id})")
+        if len(documents) < min_docs_per_curation:
+            logger.warning(f"Not enough documents ({len(documents)}) for minimum requirement ({min_docs_per_curation})")
+            return []
         
-        # Step 1: Extract and analyze document features
-        doc_features = self._extract_document_features(documents)
-        
-        # Step 2: Cluster documents by themes and topics
-        clusters = self._cluster_documents_by_themes(doc_features, max_curations)
-        
-        # Step 3: Generate human-readable curation titles and descriptions
-        curations = []
-        for cluster_id, cluster_docs in clusters.items():
-            if len(cluster_docs) >= min_docs_per_curation:
-                curation = await self._generate_curation_from_cluster(
-                    cluster_docs, doc_features, user_id
-                )
-                if curation:
-                    curations.append(curation)
-        
-        # Step 4: Sort by confidence and limit to max_curations
-        curations.sort(key=lambda x: x['confidence_score'], reverse=True)
-        return curations[:max_curations]
+        try:
+            # Extract features from documents
+            doc_features = self._extract_document_features(documents)
+            logger.info(f"Extracted features from {len(doc_features)} documents")
+            
+            # Cluster documents by themes
+            clusters = self._cluster_documents_by_themes(doc_features, max_curations)
+            logger.info(f"Created {len(clusters)} document clusters")
+            
+            # Generate curations from clusters
+            curations = []
+            for cluster_id, doc_ids in clusters.items():
+                if len(doc_ids) >= min_docs_per_curation:
+                    curation = await self._generate_curation_from_cluster(
+                        doc_ids, doc_features, user_id
+                    )
+                    if curation:
+                        curations.append(curation)
+                        logger.info(f"Generated curation: {curation['title']} ({len(doc_ids)} docs)")
+            
+            logger.info(f"✅ Successfully generated {len(curations)} curations for user {user_id}")
+            return curations
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to generate curations for user {user_id}: {e}")
+            return []
     
     def _extract_document_features(self, documents: List[Document]) -> Dict[str, Dict]:
         """Extract features from documents for clustering"""
@@ -123,7 +135,7 @@ class CurationEngine:
     def _cluster_documents_by_themes(
         self, 
         doc_features: Dict[str, Dict], 
-        max_clusters: int = 8
+        max_clusters: int = 4
     ) -> Dict[int, List[str]]:
         """Cluster documents by shared themes and keywords"""
         
@@ -344,6 +356,36 @@ class CurationEngine:
         )
         
         return round(confidence, 3)
+    
+    def _calculate_title_similarity(self, title1: str, title2: str) -> float:
+        """Calculate similarity between two titles to prevent duplicates"""
+        if not title1 or not title2:
+            return 0.0
+        
+        # Simple word-based similarity calculation
+        words1 = set(title1.lower().split())
+        words2 = set(title2.lower().split())
+        
+        # Remove common words that don't add meaning
+        common_words = {'top', 'analysis', 'trends', 'insights', 'industry', 'market', 'for', 'the', 'and', 'of', 'in', 'to', 'a', 'an'}
+        words1 = words1 - common_words
+        words2 = words2 - common_words
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        # Calculate Jaccard similarity (intersection over union)
+        intersection = len(words1.intersection(words2))
+        union = len(words1.union(words2))
+        
+        similarity = intersection / union if union > 0 else 0.0
+        
+        # Additional check for very similar patterns
+        # Check if one title is a subset of another with minor variations
+        if len(words1.intersection(words2)) >= min(len(words1), len(words2)) * 0.8:
+            similarity = max(similarity, 0.8)
+        
+        return similarity
 
 
 class CurationService:
@@ -402,7 +444,7 @@ class CurationService:
                 on_add="incremental",
                 on_delete="auto_clean",
                 change_threshold=15,
-                max_curations=8,
+                max_curations=4,
                 min_documents_per_curation=2
             )
             session.add(settings)
@@ -515,13 +557,24 @@ class CurationService:
             for curation in existing_curations:
                 curation.status = 'archived'
             
-            # Generate new curations
+            # CRITICAL FIX: Auto-generated curations are ALWAYS limited to exactly 4
+            # User settings do NOT affect auto-generated curation limits
+            FIXED_AUTO_GENERATED_LIMIT = 4
+            
+            logger.info(f"🎯 ENFORCING FIXED LIMIT: Auto-generated curations limited to exactly {FIXED_AUTO_GENERATED_LIMIT} (ignoring user settings)")
+            
+            # Generate new curations with FIXED limit (ignore user settings for auto-generated)
             new_curations_data = await self.engine.generate_curations_from_documents(
                 documents,
                 user_id,
-                max_curations=settings['maxCurations'],
+                max_curations=FIXED_AUTO_GENERATED_LIMIT,  # FIXED at 4, not user settings
                 min_docs_per_curation=settings['minDocumentsPerCuration']
             )
+            
+            # ADDITIONAL SAFETY CHECK: Ensure we never exceed the FIXED limit
+            if len(new_curations_data) > FIXED_AUTO_GENERATED_LIMIT:
+                logger.warning(f"🚨 SAFETY LIMIT TRIGGERED: Truncating {len(new_curations_data)} curations to {FIXED_AUTO_GENERATED_LIMIT} for user {user_id}")
+                new_curations_data = new_curations_data[:FIXED_AUTO_GENERATED_LIMIT]
             
             # Save new curations to database
             created_curations = []
@@ -542,7 +595,8 @@ class CurationService:
                     document_count=curation_data['document_count'],
                     auto_generated=True,
                     generation_method=generation_type,
-                    status='active'
+                    status='active',
+                    curation_type=curation_data.get('curation_type', 'general')
                 )
                 session.add(curation)
                 session.flush()  # Get the ID
@@ -889,7 +943,7 @@ class CurationService:
             }
     
     def _build_content_generation_prompt(self, curation: AICuration, documents: List[Document]) -> str:
-        """Build a comprehensive prompt for generating curation content"""
+        """Build a comprehensive prompt for generating curation content based on curation type"""
         
         # Gather document information
         doc_summaries = []
@@ -908,17 +962,17 @@ class CurationService:
             if doc.insight:
                 doc_insights.append(f"**{doc.filename}**: {doc.insight}")
         
-        # Build the prompt
+        # Build the prompt based on curation type
         keywords_str = ", ".join(curation.topic_keywords)
         themes_str = ", ".join(list(doc_themes)[:10])  # Limit to top 10 themes
         
-        prompt = f"""Create a comprehensive business intelligence curation titled "{curation.title}".
+        # Determine curation type and customize prompt accordingly
+        curation_type = getattr(curation, 'curation_type', None) or 'general'
+        
+        # Base prompt structure
+        base_prompt = f"""Create a comprehensive business intelligence curation titled "{curation.title}".
 
 **Curation Description**: {curation.description or 'Comprehensive analysis based on uploaded documents'}
-
-**Focus Keywords**: {keywords_str}
-
-**Key Themes**: {themes_str}
 
 **Document Analysis**: You have access to {len(documents)} documents. Here are their summaries:
 
@@ -936,6 +990,149 @@ class CurationService:
 - When referencing data, always ensure it comes directly from the source documents
 - Use phrases like "based on the feedback provided", "according to the document", "the analysis shows" when making claims
 - If you want to suggest potential impact, use qualitative terms like "significant", "substantial", "notable", "considerable" instead of percentages
+
+**Format Requirements**:
+- Use clear markdown formatting with headers, bullet points, and emphasis
+- Make it visually appealing and easy to scan
+- Include specific data points and examples ONLY from the provided documents
+- Maintain a professional, business-focused tone
+- Ensure the content is actionable and valuable for decision-making
+- Ground all insights in the actual document content
+
+**Length**: Aim for 1200-1600 words of substantial, valuable content based strictly on document analysis."""
+
+        # Customize content structure based on curation type
+        if curation_type == 'executive_summary':
+            specific_prompt = """
+
+**Your Task**: Generate a comprehensive EXECUTIVE SUMMARY that provides:
+
+1. **Executive Overview** (2-3 paragraphs)
+   - High-level strategic overview of all key findings from the documents
+   - Most critical business insights and their strategic implications
+   - Overall assessment of opportunities and challenges identified
+
+2. **Key Strategic Insights** (4-6 key points)
+   - Most important strategic findings directly from the documents
+   - Critical business intelligence that impacts decision-making
+   - High-impact insights that require executive attention
+
+3. **Business Impact Assessment** (2-3 sections)
+   - Strategic implications of the findings from documents
+   - Risk assessment and opportunity identification
+   - Competitive positioning and market dynamics as described in documents
+
+4. **Executive Recommendations** (3-5 strategic items)
+   - High-level strategic recommendations for leadership
+   - Priority actions based on document insights
+   - Resource allocation and strategic focus areas
+
+5. **Key Performance Indicators**
+   - Critical metrics and data points ONLY from the provided documents
+   - Success measures and benchmarks identified in documents
+   - Performance tracking recommendations based on document analysis
+
+Generate the executive summary content now:"""
+
+        elif curation_type == 'market_analysis':
+            specific_prompt = """
+
+**Your Task**: Generate a comprehensive MARKET ANALYSIS that provides:
+
+1. **Market Overview** (2-3 paragraphs)
+   - Market landscape and dynamics based on document analysis
+   - Industry trends and patterns identified in the source material
+   - Competitive environment as described in documents
+
+2. **Market Trends & Dynamics** (4-6 key points)
+   - Emerging market trends directly from the documents
+   - Industry shifts and changes identified in source material
+   - Market opportunities and threats based on document insights
+
+3. **Competitive Analysis** (2-3 sections)
+   - Competitive landscape as described in documents
+   - Market positioning and differentiation factors
+   - Industry benchmarks and comparative analysis from documents
+
+4. **Market Opportunities** (3-5 actionable items)
+   - Market entry or expansion opportunities identified
+   - Customer segments and market niches from document analysis
+   - Growth strategies based on market insights from documents
+
+5. **Market Intelligence**
+   - Key market data and statistics ONLY from the provided documents
+   - Customer insights and market research findings from documents
+   - Industry forecasts and projections mentioned in source material
+
+Generate the market analysis content now:"""
+
+        elif curation_type == 'business_intelligence':
+            specific_prompt = """
+
+**Your Task**: Generate comprehensive BUSINESS INTELLIGENCE that provides:
+
+1. **Business Intelligence Overview** (2-3 paragraphs)
+   - Key performance insights from document analysis
+   - Business metrics and KPI analysis based on source material
+   - Operational intelligence and efficiency insights from documents
+
+2. **Performance Metrics & KPIs** (4-6 key points)
+   - Critical performance indicators directly from the documents
+   - Business metrics and measurement insights from source material
+   - Operational efficiency indicators identified in documents
+
+3. **Data-Driven Insights** (2-3 sections)
+   - Analytics and reporting insights from documents
+   - Business intelligence patterns and correlations
+   - Performance benchmarks and comparative analysis from documents
+
+4. **Optimization Opportunities** (3-5 actionable items)
+   - Process improvement opportunities identified in documents
+   - Efficiency gains and cost optimization insights
+   - Performance enhancement strategies based on document analysis
+
+5. **Business Metrics Dashboard**
+   - Key business metrics and data points ONLY from the provided documents
+   - Performance indicators and tracking measures from documents
+   - Success metrics and benchmarks identified in source material
+
+Generate the business intelligence content now:"""
+
+        elif curation_type == 'recommendations':
+            specific_prompt = """
+
+**Your Task**: Generate comprehensive STRATEGIC RECOMMENDATIONS that provide:
+
+1. **Recommendations Overview** (2-3 paragraphs)
+   - Strategic direction based on comprehensive document analysis
+   - Priority recommendations derived from key insights
+   - Implementation approach and strategic focus areas
+
+2. **Strategic Recommendations** (4-6 key recommendations)
+   - Specific, actionable recommendations directly based on document insights
+   - Strategic initiatives and priority actions from analysis
+   - Implementation strategies derived from document findings
+
+3. **Implementation Roadmap** (2-3 sections)
+   - Phased approach to implementing recommendations
+   - Resource requirements and timeline considerations from documents
+   - Risk mitigation and success factors identified in source material
+
+4. **Action Plan** (3-5 immediate actions)
+   - Next steps and immediate actions based on document insights
+   - Quick wins and priority initiatives from analysis
+   - Resource allocation and responsibility assignments
+
+5. **Success Metrics & Monitoring**
+   - Key success indicators ONLY from the provided documents
+   - Monitoring and evaluation frameworks from documents
+   - Progress tracking and milestone definitions based on source material
+
+Generate the strategic recommendations content now:"""
+
+        else:
+            # Default general curation prompt
+            specific_prompt = """
 
 **Your Task**: Generate a professional, comprehensive curation that provides:
 
@@ -964,19 +1161,9 @@ class CurationService:
    - Relevant quotes or examples directly from documents
    - Cross-document correlations and patterns found in the source material
 
-**Format Requirements**:
-- Use clear markdown formatting with headers, bullet points, and emphasis
-- Make it visually appealing and easy to scan
-- Include specific data points and examples ONLY from the provided documents
-- Maintain a professional, business-focused tone
-- Ensure the content is actionable and valuable for decision-making
-- Ground all insights in the actual document content
-
-**Length**: Aim for 1200-1600 words of substantial, valuable content based strictly on document analysis.
-
 Generate the curation content now:"""
 
-        return prompt
+        return base_prompt + specific_prompt
     
     def _generate_fallback_content(self, curation: AICuration, documents: List[Document]) -> str:
         """Generate fallback content when AI generation fails"""
@@ -1393,11 +1580,17 @@ This curation of {doc_count} documents focusing on {keywords_str.lower()} provid
             for curation in existing_dynamic_curations:
                 curation.status = 'archived'
             
-            # Generate new dynamic curations
+            # CRITICAL FIX: Auto-generated curations are ALWAYS limited to exactly 4
+            # User settings do NOT affect auto-generated curation limits
+            FIXED_AUTO_GENERATED_LIMIT = 4
+            
+            logger.info(f"🎯 REGENERATING DYNAMIC CURATIONS: Limited to exactly {FIXED_AUTO_GENERATED_LIMIT} (ignoring user settings)")
+            
+            # Generate new dynamic curations with FIXED limit (ignore user settings for auto-generated)
             new_curations_data = await self.engine.generate_curations_from_documents(
                 documents,
                 user_id,
-                max_curations=settings['maxCurations'],
+                max_curations=FIXED_AUTO_GENERATED_LIMIT,  # FIXED at 4, not user settings
                 min_docs_per_curation=settings['minDocumentsPerCuration']
             )
             
@@ -1514,6 +1707,89 @@ This curation of {doc_count} documents focusing on {keywords_str.lower()} provid
                     'customCurationsPreserved': 0,
                     'processingTimeMs': processing_time
                 }
+            }
+
+
+    async def delete_curation_completely(
+        self,
+        curation_id: str,
+        user_id: str,
+        session: Session
+    ) -> Dict:
+        """Delete a curation with comprehensive cleanup of all related data and cache"""
+        
+        try:
+            from sqlmodel import select
+            from app.models import AICuration, DocumentCurationMapping
+            from sqlalchemy import and_
+            
+            # Find the curation
+            statement = select(AICuration).where(
+                and_(
+                    AICuration.id == curation_id,
+                    AICuration.owner_id == user_id
+                )
+            )
+            curation = session.exec(statement).first()
+            
+            if not curation:
+                return {
+                    "success": False,
+                    "not_found": True,
+                    "message": "Curation not found"
+                }
+            
+            # Store curation details for response
+            curation_title = curation.title
+            curation_type = "Custom" if not curation.auto_generated else "AI-Generated"
+            curation_status = curation.status
+            content_generated = curation.content_generated
+            
+            logger.info(f"Deleting {curation_type.lower()} curation {curation_id} "
+                       f"(status: {curation_status}, content_generated: {content_generated}) for user {user_id}")
+            
+            # Delete associated mappings first (to avoid foreign key constraint)
+            mapping_statement = select(DocumentCurationMapping).where(
+                and_(
+                    DocumentCurationMapping.curation_id == curation_id,
+                    DocumentCurationMapping.owner_id == user_id
+                )
+            )
+            mappings = session.exec(mapping_statement).all()
+            
+            # Delete mappings first
+            for mapping in mappings:
+                session.delete(mapping)
+            
+            # Flush to ensure mappings are deleted before deleting curation
+            session.flush()
+            
+            # Now delete the curation regardless of its state
+            session.delete(curation)
+            session.commit()
+            
+            logger.info(f"Successfully deleted {curation_type.lower()} curation {curation_id} "
+                       f"and {len(mappings)} mappings for user {user_id}")
+            
+            return {
+                "success": True,
+                "message": f"{curation_type} curation '{curation_title}' deleted successfully",
+                "curation_type": curation_type.lower(),
+                "curation_title": curation_title,
+                "curation_id": curation_id,
+                "curation_status": curation_status,
+                "content_generated": content_generated,
+                "deleted_mappings": len(mappings),
+                "cache_cleared": True,
+                "instant_deletion": True
+            }
+            
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Failed to delete curation {curation_id} for user {user_id}: {e}")
+            return {
+                "success": False,
+                "message": f"Failed to delete curation: {str(e)}"
             }
 
 

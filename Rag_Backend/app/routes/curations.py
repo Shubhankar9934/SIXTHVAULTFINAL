@@ -184,63 +184,28 @@ async def delete_curation(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
-    """Delete a specific curation"""
+    """Delete a specific curation with comprehensive cleanup"""
     # Store user_id early to avoid session issues in error handling
     user_id = str(user.id)
     
     try:
-        from sqlmodel import select
-        from app.models import AICuration, DocumentCurationMapping
-        from sqlalchemy import and_
-        
-        # Find the curation
-        statement = select(AICuration).where(
-            and_(
-                AICuration.id == curation_id,
-                AICuration.owner_id == user_id
-            )
+        # Use the enhanced deletion service method
+        result = await curation_service.delete_curation_completely(
+            curation_id, user_id, session
         )
-        curation = session.exec(statement).first()
         
-        if not curation:
-            raise HTTPException(status_code=404, detail="Curation not found")
-        
-        # Store curation title for response
-        curation_title = curation.title
-        
-        # Delete associated mappings first (to avoid foreign key constraint)
-        mapping_statement = select(DocumentCurationMapping).where(
-            and_(
-                DocumentCurationMapping.curation_id == curation_id,
-                DocumentCurationMapping.owner_id == user_id
-            )
-        )
-        mappings = session.exec(mapping_statement).all()
-        
-        # Delete mappings first
-        for mapping in mappings:
-            session.delete(mapping)
-        
-        # Flush to ensure mappings are deleted before deleting curation
-        session.flush()
-        
-        # Now delete the curation
-        session.delete(curation)
-        session.commit()
-        
-        logger.info(f"Successfully deleted curation {curation_id} and {len(mappings)} mappings for user {user_id}")
-        
-        return {
-            "success": True,
-            "message": f"Curation '{curation_title}' deleted successfully",
-            "deletedMappings": len(mappings)
-        }
+        if result["success"]:
+            logger.info(f"Successfully deleted curation {curation_id} for user {user_id}")
+            return result
+        else:
+            if result.get("not_found"):
+                raise HTTPException(status_code=404, detail=result["message"])
+            else:
+                raise HTTPException(status_code=500, detail=result["message"])
         
     except HTTPException:
-        session.rollback()
         raise
     except Exception as e:
-        session.rollback()
         logger.error(f"Failed to delete curation {curation_id} for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete curation: {str(e)}")
 

@@ -69,7 +69,7 @@ export class AICurationService {
         onAdd: 'incremental',
         onDelete: 'auto_clean',
         changeThreshold: 15,
-        maxCurations: 10,
+        maxCurations: 3,
         minDocumentsPerCuration: 2
       }
       this.status = cachedStatus || {
@@ -144,10 +144,14 @@ export class AICurationService {
           new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), timeout))
         ]) as AICuration[]
         
-        this.curations = curations
+        // Filter out persistently deleted curations before storing
+        const deletedCurationIds = this.getDeletedCurationIds()
+        const filteredCurations = curations.filter(curation => !deletedCurationIds.includes(curation.id))
+        
+        this.curations = filteredCurations
         cacheManager.set(CacheKeys.curations(), this.curations, this.DATA_TTL)
         cacheManager.set(CacheKeys.curations() + '_meta', { timestamp: Date.now() }, this.DATA_TTL)
-        console.log(`AI Curation Service: Updated ${this.curations.length} curations`)
+        console.log(`AI Curation Service: Updated ${this.curations.length} curations (filtered out ${curations.length - filteredCurations.length} deleted items)`)
       } catch (error) {
         console.warn('AI Curation Service: Failed to refresh curations:', error)
       }
@@ -191,10 +195,43 @@ export class AICurationService {
   }
 
   /**
-   * Get all curations
+   * Get all curations (filtered to exclude persistently deleted ones)
    */
   getCurations(): AICuration[] {
-    return this.curations
+    const deletedCurationIds = this.getDeletedCurationIds()
+    return this.curations.filter(curation => !deletedCurationIds.includes(curation.id))
+  }
+
+  /**
+   * Get deleted curation IDs from persistent storage
+   */
+  private getDeletedCurationIds(): string[] {
+    const deletedIds = cacheManager.get<string[]>(CacheKeys.deletedCurations()) || []
+    console.log(`🗑️ AI Curation Service: Found ${deletedIds.length} persistently deleted curations`)
+    return deletedIds
+  }
+
+  /**
+   * Add curation ID to persistent deletion list
+   */
+  private addToDeletedList(curationId: string): void {
+    const deletedIds = this.getDeletedCurationIds()
+    if (!deletedIds.includes(curationId)) {
+      deletedIds.push(curationId)
+      // Store with very long TTL (1 year) to persist across sessions
+      cacheManager.set(CacheKeys.deletedCurations(), deletedIds, 365 * 24 * 60 * 60 * 1000)
+      console.log(`🗑️ AI Curation Service: Added ${curationId} to persistent deletion list`)
+    }
+  }
+
+  /**
+   * Remove curation ID from persistent deletion list (for restoration)
+   */
+  private removeFromDeletedList(curationId: string): void {
+    const deletedIds = this.getDeletedCurationIds()
+    const updatedIds = deletedIds.filter(id => id !== curationId)
+    cacheManager.set(CacheKeys.deletedCurations(), updatedIds, 365 * 24 * 60 * 60 * 1000)
+    console.log(`🔄 AI Curation Service: Removed ${curationId} from persistent deletion list`)
   }
 
   /**
@@ -561,64 +598,124 @@ This curation highlights the importance of leveraging your document insights for
   }
 
   /**
-   * Delete a curation with optimistic UI updates
+   * Clear the persistent deletion list (for admin/debugging purposes)
    */
-  async deleteCuration(curationId: string): Promise<{ success: boolean; message: string }> {
+  clearDeletedCurationsList(): void {
+    cacheManager.delete(CacheKeys.deletedCurations())
+    console.log('🗑️ AI Curation Service: Cleared persistent deletion list')
+  }
+
+  /**
+   * Force refresh curations from backend, ignoring deleted list
+   */
+  async forceRefreshFromBackend(): Promise<void> {
     try {
-      console.log('AI Curation Service: Deleting curation with optimistic update:', curationId)
+      console.log('🔄 AI Curation Service: Force refreshing curations from backend')
+      const freshCurations = await ragApiClient.getAICurations()
       
-      // Store the curation for potential rollback
+      // Update local data without filtering for deleted items
+      this.curations = freshCurations
+      cacheManager.set(CacheKeys.curations(), freshCurations, this.DATA_TTL)
+      cacheManager.set(CacheKeys.curations() + '_meta', { timestamp: Date.now() }, this.DATA_TTL)
+      
+      console.log(`✅ AI Curation Service: Force refreshed ${freshCurations.length} curations from backend`)
+    } catch (error) {
+      console.error('❌ AI Curation Service: Failed to force refresh from backend:', error)
+    }
+  }
+
+  /**
+   * Delete a curation with optimistic UI updates and enhanced feedback
+   * Handles all curation states including ungenerated/generating curations
+   */
+  async deleteCuration(curationId: string): Promise<{ success: boolean; message: string; details?: any }> {
+    try {
+      console.log('AI Curation Service: Deleting curation with instant optimistic update:', curationId)
+      
+      // Store the curation for potential rollback and better feedback
       const curationToDelete = this.curations.find(c => c.id === curationId)
       if (!curationToDelete) {
         return {
           success: false,
-          message: 'Curation not found'
+          message: 'Curation not found in local cache'
         }
       }
 
-      // OPTIMISTIC UPDATE: Instantly remove from local data for immediate UI response
+      const curationTitle = curationToDelete.title
+      const curationKeywords = curationToDelete.topicKeywords || curationToDelete.keywords || []
+      const isCustomCuration = !curationToDelete.autoGenerated
+      const curationStatus = (curationToDelete as any).status || 'unknown'
+
+      console.log(`AI Curation Service: Deleting ${isCustomCuration ? 'custom' : 'AI-generated'} curation: "${curationTitle}" (status: ${curationStatus})`)
+
+      // INSTANT OPTIMISTIC UPDATE: Remove from local data immediately for instant UI response
+      // This ensures the curation disappears from UI regardless of its generation state
       this.curations = this.curations.filter(c => c.id !== curationId)
       
-      // Clear all cached content for this curation immediately
+      // ADD TO PERSISTENT DELETION LIST: Prevent reappearance on future logins
+      this.addToDeletedList(curationId)
+      
+      // Clear ALL cached content for this curation immediately (all providers/models)
       cacheManager.clearByPattern(`curation_content_${curationId}_.*`)
+      cacheManager.clearByPattern(`curation_.*_${curationId}`)
       
-      // Update cache immediately for instant UI update
+      // Also clear any temporary cache entries
+      cacheManager.clearByPattern(`curation_content_temp_${curationTitle.toLowerCase().replace(/\s+/g, '_')}`)
+      
+      // Update cache immediately for instant UI update across all sessions
       cacheManager.set(CacheKeys.curations(), this.curations, this.DATA_TTL)
+      cacheManager.set(CacheKeys.curations() + '_meta', { timestamp: Date.now() }, this.DATA_TTL)
       
-      console.log('AI Curation Service: Curation removed from UI instantly')
+      // ASYNC CACHE CLEANUP: Remove deleted curation from all cached history
+      setTimeout(() => {
+        this.cleanupDeletedCurationFromCache(curationId)
+      }, 100)
+      
+      console.log('✅ AI Curation Service: Curation removed from UI instantly and added to persistent deletion list - will not reappear on future logins')
 
-      // Handle backend deletion in background
-      try {
-        const result = await ragApiClient.deleteCuration(curationId)
-        
-        if (result.success) {
-          console.log('AI Curation Service: Backend deletion completed successfully')
-          return {
-            success: true,
-            message: result.message || 'Curation deleted successfully'
+      // Handle backend deletion in background (non-blocking)
+      // This ensures UI responsiveness regardless of backend state
+      setTimeout(async () => {
+        try {
+          console.log('🔄 AI Curation Service: Starting background backend deletion for:', curationId)
+          const result = await ragApiClient.deleteCuration(curationId)
+          
+          if (result.success) {
+            console.log('✅ AI Curation Service: Backend deletion completed successfully')
+            // Safe property access with type assertion
+            const resultData = result as any
+            console.log('   - Curation type:', resultData.curation_type || 'unknown')
+            console.log('   - Status was:', resultData.curation_status || 'unknown')
+            console.log('   - Content generated:', resultData.content_generated || false)
+          } else {
+            console.warn('⚠️ AI Curation Service: Backend deletion failed, but UI already updated:', result.message)
           }
-        } else {
-          console.error('AI Curation Service: Backend deletion failed, but UI already updated')
-          // For professional UX, we keep it removed from frontend even if backend fails
-          // Optionally: Could restore the curation if backend fails, but this creates poor UX
-          return {
-            success: true, // Return success since UI is already updated
-            message: 'Curation removed from interface (backend deletion may have failed)'
-          }
+        } catch (error) {
+          console.error('❌ AI Curation Service: Background backend deletion error:', error)
+          // Don't affect UI since deletion already happened from user perspective
         }
-      } catch (error) {
-        console.error('AI Curation Service: Backend deletion error:', error)
-        // UI already updated, so user sees instant deletion regardless of backend status
-        return {
-          success: true, // Return success since UI is already updated
-          message: 'Curation removed from interface'
+      }, 100) // Small delay to ensure UI update completes first
+
+      // Return immediate success since UI is already updated
+      return {
+        success: true,
+        message: `${isCustomCuration ? 'Custom' : 'AI-generated'} curation "${curationTitle}" deleted successfully`,
+        details: {
+          curationTitle,
+          curationKeywords,
+          isCustomCuration,
+          curationStatus,
+          instantDeletion: true,
+          uiUpdated: true,
+          cacheCleared: true,
+          backendDeletionInProgress: true
         }
       }
     } catch (error) {
-      console.error('AI Curation Service: Failed to delete curation:', error)
+      console.error('💥 AI Curation Service: Failed to delete curation:', error)
       return {
         success: false,
-        message: error instanceof Error ? error.message : 'Unknown error occurred'
+        message: error instanceof Error ? error.message : 'Unknown error occurred during deletion'
       }
     }
   }
@@ -699,6 +796,88 @@ This curation highlights the importance of leveraging your document insights for
       console.log('AI Curation Service: All curations cleared from frontend')
     } catch (error) {
       console.error('AI Curation Service: Failed to handle all documents deletion:', error)
+    }
+  }
+
+  /**
+   * Async cleanup of deleted curation from all cached history
+   * This ensures deleted curations are completely removed from cache, not just filtered
+   */
+  private async cleanupDeletedCurationFromCache(curationId: string): Promise<void> {
+    try {
+      console.log(`🧹 AI Curation Service: Starting async cache cleanup for deleted curation: ${curationId}`)
+      
+      // Get all cached curations lists and remove the deleted curation
+      const cachedCurations = cacheManager.get<AICuration[]>(CacheKeys.curations())
+      if (cachedCurations) {
+        const filteredCurations = cachedCurations.filter(c => c.id !== curationId)
+        if (filteredCurations.length !== cachedCurations.length) {
+          // Update the cached curations list without the deleted item
+          cacheManager.set(CacheKeys.curations(), filteredCurations, this.DATA_TTL)
+          console.log(`✅ AI Curation Service: Removed deleted curation from cached curations list`)
+        }
+      }
+      
+      // Clear any remaining cache entries related to this curation
+      const deletedContentKeys = cacheManager.getKeysByPattern(`.*${curationId}.*`)
+      let cleanedCount = 0
+      
+      deletedContentKeys.forEach(key => {
+        if (cacheManager.delete(key)) {
+          cleanedCount++
+        }
+      })
+      
+      if (cleanedCount > 0) {
+        console.log(`✅ AI Curation Service: Cleaned up ${cleanedCount} additional cache entries for deleted curation`)
+      }
+      
+      // Also clean up any session storage entries that might contain this curation
+      try {
+        const sessionKeys = ['cached_curation_messages', 'preloaded_conversation_content']
+        sessionKeys.forEach(sessionKey => {
+          const sessionData = sessionStorage.getItem(sessionKey)
+          if (sessionData) {
+            try {
+              const parsed = JSON.parse(sessionData)
+              if (Array.isArray(parsed)) {
+                // Filter out any entries related to the deleted curation
+                const filtered = parsed.filter((item: any) => 
+                  !item.title?.includes(curationId) && 
+                  !item.content?.includes(curationId) &&
+                  item.id !== curationId
+                )
+                if (filtered.length !== parsed.length) {
+                  sessionStorage.setItem(sessionKey, JSON.stringify(filtered))
+                  console.log(`✅ AI Curation Service: Cleaned up session storage: ${sessionKey}`)
+                }
+              } else if (typeof parsed === 'object' && parsed !== null) {
+                // For object-based session storage, remove any keys related to the curation
+                let modified = false
+                Object.keys(parsed).forEach(key => {
+                  if (key.includes(curationId)) {
+                    delete parsed[key]
+                    modified = true
+                  }
+                })
+                if (modified) {
+                  sessionStorage.setItem(sessionKey, JSON.stringify(parsed))
+                  console.log(`✅ AI Curation Service: Cleaned up session storage object: ${sessionKey}`)
+                }
+              }
+            } catch (parseError) {
+              console.warn(`⚠️ AI Curation Service: Could not parse session storage ${sessionKey}:`, parseError)
+            }
+          }
+        })
+      } catch (sessionError) {
+        console.warn('⚠️ AI Curation Service: Error cleaning session storage:', sessionError)
+      }
+      
+      console.log(`🎉 AI Curation Service: Async cache cleanup completed for curation: ${curationId}`)
+      
+    } catch (error) {
+      console.error('❌ AI Curation Service: Error during async cache cleanup:', error)
     }
   }
 

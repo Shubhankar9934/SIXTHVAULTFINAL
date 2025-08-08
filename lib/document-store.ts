@@ -307,6 +307,37 @@ class DocumentStore {
     // CRITICAL FIX: Immediately refresh documents to show completed processing
     this.refreshDocuments().then(() => {
       console.log('DocumentStore: Documents refreshed after batch completion')
+      
+      // ADDITIONAL FIX: Trigger cross-tab sync event for vault page
+      try {
+        localStorage.setItem('sixthvault_document_upload_event', JSON.stringify({
+          type: 'batch_completed',
+          batchId: batchId,
+          timestamp: Date.now(),
+          documentCount: this.cache.length
+        }))
+        
+        // Remove the event after a short delay to allow other tabs to process it
+        setTimeout(() => {
+          localStorage.removeItem('sixthvault_document_upload_event')
+        }, 1000)
+        
+        console.log('DocumentStore: Triggered cross-tab sync event for vault page update')
+      } catch (error) {
+        console.error('DocumentStore: Failed to trigger cross-tab sync event:', error)
+      }
+      
+      // ADDITIONAL FIX: Force cache invalidation signal
+      try {
+        localStorage.setItem('sixthvault_cache_invalidate_documents', Date.now().toString())
+        setTimeout(() => {
+          localStorage.removeItem('sixthvault_cache_invalidate_documents')
+        }, 1000)
+        console.log('DocumentStore: Sent cache invalidation signal')
+      } catch (error) {
+        console.error('DocumentStore: Failed to send cache invalidation signal:', error)
+      }
+      
     }).catch((error) => {
       console.error('DocumentStore: Failed to refresh documents after batch completion:', error)
     })

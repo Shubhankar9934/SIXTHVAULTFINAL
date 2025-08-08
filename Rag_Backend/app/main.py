@@ -154,20 +154,59 @@ async def startup_event():
     print("   - Large Context: 📄 32K tokens supported")
     print("=" * 50)
 
-# Add CORS middleware
+# Add CORS middleware with enhanced configuration for production deployment
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:8000", "https://sixth-vault.com", "null"],  # Allow local file access and testing
+    allow_origins=[
+        "http://localhost:3000", 
+        "http://127.0.0.1:3000",
+        "http://localhost:8000", 
+        "http://127.0.0.1:8000",
+        "https://sixth-vault.com", 
+        "https://www.sixth-vault.com",
+        "http://sixth-vault.com",  # HTTP fallback
+        "http://www.sixth-vault.com",  # HTTP fallback
+        # Add any other domains you might use
+    ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-    max_age=3600,  # Cache preflight requests for 1 hour
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Content-Language",
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "X-CSRFToken",
+        "X-Real-IP",
+        "X-Forwarded-For",
+        "X-Forwarded-Proto",
+        "Cache-Control",
+        "Pragma",
+        "ngrok-skip-browser-warning",
+        "User-Agent",
+        "Referer",
+        "Origin"
+    ],
+    expose_headers=[
+        "Content-Length",
+        "Content-Range",
+        "Content-Type",
+        "Authorization",
+        "X-Total-Count",
+        "X-Page-Count"
+    ],
+    max_age=86400,  # Cache preflight requests for 24 hours
 )
 
 # Configure FastAPI to prevent 307 redirects by default
 app.router.redirect_slashes = False
 
+# Add global OPTIONS handler for CORS preflight requests
+@app.options("/{full_path:path}")
+async def options_handler(full_path: str):
+    """Handle all OPTIONS requests for CORS preflight"""
+    return {"message": "OK"}
 
 # Include routers
 app.include_router(auth_router)

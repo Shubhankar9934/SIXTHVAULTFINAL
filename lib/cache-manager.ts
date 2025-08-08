@@ -1,6 +1,7 @@
 /**
- * Global Cache Manager - Persistent caching system for AI content
- * Implements ChatGPT-like preloading to eliminate reload times
+ * Focused Cache Manager - Caching ONLY for AI Curation and Chat History
+ * Implements optimized caching specifically for these two features only
+ * Documents upload/delete and other functionalities are excluded from caching
  */
 
 export interface CacheEntry<T> {
@@ -29,8 +30,14 @@ class CacheManager {
     totalEntries: 0
   }
   private readonly STORAGE_KEY = 'sixthvault_cache'
-  private readonly VERSION = '1.0.0'
+  private readonly VERSION = '2.0.0' // Updated for focused caching
   private readonly DEFAULT_TTL = 30 * 60 * 1000 // 30 minutes
+  
+  // Focused TTL settings for AI Curation and Chat History ONLY
+  private readonly CURATION_CONTENT_TTL = 2 * 60 * 60 * 1000 // 2 hours for curation content
+  private readonly CURATION_DATA_TTL = 60 * 60 * 1000 // 1 hour for curation data
+  private readonly CHAT_HISTORY_TTL = 24 * 60 * 60 * 1000 // 24 hours for chat history
+  private readonly CONVERSATION_TTL = 12 * 60 * 60 * 1000 // 12 hours for conversations
 
   private constructor() {
     this.loadFromStorage()
@@ -316,13 +323,45 @@ class CacheManager {
   }
 
   /**
-   * Start automatic cleanup interval
+   * Start automatic cleanup interval with enhanced focused cleanup
    */
   private startCleanupInterval(): void {
+    // Enhanced cleanup every 3 minutes for better performance
     setInterval(() => {
       this.cleanupExpiredEntries()
       this.persistToStorage()
-    }, 5 * 60 * 1000) // Cleanup every 5 minutes
+      
+      // Log focused cache statistics periodically
+      const focusedStats = this.getFocusedStats()
+      console.log('🔄 Auto Cleanup - Focused Cache Stats:', focusedStats)
+    }, 3 * 60 * 1000) // Cleanup every 3 minutes
+    
+    // Additional cleanup for very old entries every 30 minutes
+    setInterval(() => {
+      this.cleanupVeryOldEntries()
+    }, 30 * 60 * 1000) // Deep cleanup every 30 minutes
+  }
+
+  /**
+   * Clean up very old entries (older than 24 hours) for memory optimization
+   */
+  private cleanupVeryOldEntries(): void {
+    const now = Date.now()
+    const maxAge = 24 * 60 * 60 * 1000 // 24 hours
+    let deletedCount = 0
+
+    for (const [key, entry] of this.cache.entries()) {
+      if (now - entry.timestamp > maxAge) {
+        this.cache.delete(key)
+        deletedCount++
+      }
+    }
+
+    if (deletedCount > 0) {
+      this.stats.totalEntries = this.cache.size
+      console.log(`🧹 Deep Cleanup: Removed ${deletedCount} very old cache entries`)
+      this.persistToStorage()
+    }
   }
 
   /**
@@ -396,12 +435,235 @@ class CacheManager {
   }
 
   /**
+   * Clear document-related caches
+   */
+  clearDocumentCaches(): number {
+    console.log('Cache: Clearing all document-related caches')
+    let deletedCount = 0
+    
+    // Clear documents list cache
+    if (this.delete(CacheKeys.documents())) {
+      deletedCount++
+    }
+    
+    // Clear all document content caches
+    deletedCount += this.clearByPattern('document_.*')
+    
+    // Clear any other document-related patterns
+    deletedCount += this.clearByPattern('documents_.*')
+    
+    console.log(`Cache: Cleared ${deletedCount} document-related cache entries`)
+    return deletedCount
+  }
+
+  /**
+   * Clear all vault-related caches (documents, curations, summaries)
+   */
+  clearVaultCaches(): number {
+    console.log('Cache: Clearing all vault-related caches')
+    let deletedCount = 0
+    
+    // Clear documents
+    deletedCount += this.clearDocumentCaches()
+    
+    // Clear curations
+    deletedCount += this.clearByPattern(CacheKeys.patterns.allCurations)
+    
+    // Clear summaries
+    deletedCount += this.clearByPattern(CacheKeys.patterns.allSummaries)
+    
+    // Clear analytics
+    if (this.delete(CacheKeys.analytics())) {
+      deletedCount++
+    }
+    
+    console.log(`Cache: Cleared ${deletedCount} vault-related cache entries`)
+    return deletedCount
+  }
+
+  /**
+   * FOCUSED CACHING METHODS - AI Curation and Chat History ONLY
+   */
+
+  /**
+   * Cache AI Curation content with optimized TTL
+   */
+  setCurationContent(curationId: string, content: string, provider: string, model: string): void {
+    const key = CacheKeys.curationContent(curationId, provider, model)
+    this.set(key, content, this.CURATION_CONTENT_TTL)
+    console.log(`✅ Focused Cache: Stored AI curation content for ${curationId}`)
+  }
+
+  /**
+   * Get cached AI Curation content
+   */
+  getCurationContent(curationId: string, provider: string, model: string): string | null {
+    const key = CacheKeys.curationContent(curationId, provider, model)
+    const content = this.get<string>(key)
+    if (content) {
+      console.log(`⚡ Focused Cache: Retrieved AI curation content for ${curationId}`)
+    }
+    return content
+  }
+
+  /**
+   * Cache AI Curation data with optimized TTL
+   */
+  setCurationData(curations: any[]): void {
+    this.set(CacheKeys.curations(), curations, this.CURATION_DATA_TTL)
+    console.log(`✅ Focused Cache: Stored ${curations.length} AI curations`)
+  }
+
+  /**
+   * Get cached AI Curation data
+   */
+  getCurationData(): any[] | null {
+    const curations = this.get<any[]>(CacheKeys.curations())
+    if (curations) {
+      console.log(`⚡ Focused Cache: Retrieved ${curations.length} AI curations`)
+    }
+    return curations
+  }
+
+  /**
+   * Cache Chat History/Conversations with optimized TTL
+   */
+  setChatHistory(conversations: any[]): void {
+    this.set('chat_conversations', conversations, this.CHAT_HISTORY_TTL)
+    console.log(`✅ Focused Cache: Stored ${conversations.length} chat conversations`)
+  }
+
+  /**
+   * Get cached Chat History/Conversations
+   */
+  getChatHistory(): any[] | null {
+    const conversations = this.get<any[]>('chat_conversations')
+    if (conversations) {
+      console.log(`⚡ Focused Cache: Retrieved ${conversations.length} chat conversations`)
+    }
+    return conversations
+  }
+
+  /**
+   * Cache individual conversation content
+   */
+  setConversationContent(conversationId: string, conversation: any, messages: any[]): void {
+    const key = `conversation_content_${conversationId}`
+    const data = { conversation, messages }
+    this.set(key, data, this.CONVERSATION_TTL)
+    console.log(`✅ Focused Cache: Stored conversation content for ${conversationId}`)
+  }
+
+  /**
+   * Get cached conversation content
+   */
+  getConversationContent(conversationId: string): { conversation: any; messages: any[] } | null {
+    const key = `conversation_content_${conversationId}`
+    const data = this.get<{ conversation: any; messages: any[] }>(key)
+    if (data) {
+      console.log(`⚡ Focused Cache: Retrieved conversation content for ${conversationId}`)
+    }
+    return data
+  }
+
+  /**
+   * Clear only AI Curation caches (focused clearing)
+   */
+  clearCurationCaches(): number {
+    console.log('🎯 Focused Cache: Clearing AI Curation caches only')
+    let deletedCount = 0
+    
+    // Clear curations list
+    if (this.delete(CacheKeys.curations())) {
+      deletedCount++
+    }
+    
+    // Clear all curation content
+    deletedCount += this.clearByPattern('curation_content_.*')
+    
+    // Clear curation settings
+    if (this.delete(CacheKeys.curationSettings())) {
+      deletedCount++
+    }
+    
+    console.log(`✅ Focused Cache: Cleared ${deletedCount} AI curation cache entries`)
+    return deletedCount
+  }
+
+  /**
+   * Clear only Chat History caches (focused clearing)
+   */
+  clearChatHistoryCaches(): number {
+    console.log('🎯 Focused Cache: Clearing Chat History caches only')
+    let deletedCount = 0
+    
+    // Clear conversations list
+    if (this.delete('chat_conversations')) {
+      deletedCount++
+    }
+    
+    // Clear all conversation content
+    deletedCount += this.clearByPattern('conversation_content_.*')
+    
+    console.log(`✅ Focused Cache: Cleared ${deletedCount} chat history cache entries`)
+    return deletedCount
+  }
+
+  /**
+   * Clear ONLY focused caches (AI Curation + Chat History)
+   */
+  clearFocusedCaches(): number {
+    console.log('🎯 Focused Cache: Clearing ONLY AI Curation and Chat History caches')
+    let deletedCount = 0
+    
+    deletedCount += this.clearCurationCaches()
+    deletedCount += this.clearChatHistoryCaches()
+    
+    console.log(`✅ Focused Cache: Cleared ${deletedCount} focused cache entries total`)
+    return deletedCount
+  }
+
+  /**
+   * Get focused cache statistics (AI Curation + Chat History only)
+   */
+  getFocusedStats(): {
+    curationEntries: number
+    chatHistoryEntries: number
+    totalFocusedEntries: number
+    focusedCacheSize: number
+  } {
+    const curationKeys = this.getKeysByPattern('(ai_curations|curation_.*)')
+    const chatKeys = this.getKeysByPattern('(chat_conversations|conversation_.*)')
+    
+    return {
+      curationEntries: curationKeys.length,
+      chatHistoryEntries: chatKeys.length,
+      totalFocusedEntries: curationKeys.length + chatKeys.length,
+      focusedCacheSize: this.calculateFocusedCacheSize(curationKeys.concat(chatKeys))
+    }
+  }
+
+  /**
+   * Calculate size of focused cache entries only
+   */
+  private calculateFocusedCacheSize(keys: string[]): number {
+    try {
+      const focusedEntries = keys.map(key => this.cache.get(key)).filter(Boolean)
+      const serialized = JSON.stringify(focusedEntries)
+      return new Blob([serialized]).size
+    } catch {
+      return 0
+    }
+  }
+
+  /**
    * Export cache for debugging
    */
   export(): any {
     return {
       entries: Array.from(this.cache.entries()),
       stats: this.getStats(),
+      focusedStats: this.getFocusedStats(),
       version: this.VERSION
     }
   }
@@ -418,6 +680,7 @@ export const CacheKeys = {
     `curation_content_${id}_${provider}_${model}`,
   curationSettings: () => 'curation_settings',
   curationStatus: () => 'curation_status',
+  deletedCurations: () => 'deleted_curations_list',
 
   // AI Summaries  
   summaries: () => 'ai_summaries',
