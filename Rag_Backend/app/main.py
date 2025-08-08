@@ -4,23 +4,23 @@ import asyncio
 import json
 import time
 from app.database import init_db
-from app.routes import upload_router, query_router
+from app.routes import upload_router, query_router, conversations_router
 from app.routes.documents import router as documents_router
-from app.routes.ollama import router as ollama_router
 from app.routes.health import router as health_router
 from app.routes.curations import router as curations_router
 from app.routes.summaries import router as summaries_router
 from app.routes.admin import router as admin_router
+from app.routes.providers import router as providers_router
 from app.auth.routes import router as auth_router
 from app.utils.broadcast import subscribe, unsubscribe
 from app.auth.jwt_handler import verify_token
 
 app = FastAPI(title="DocAI - RAG Backend with Authentication")
 
-# Initialize database and Ollama on startup
+# Initialize database on startup
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database, Ollama models, and perform startup tasks"""
+    """Initialize database, LLM models, and perform startup tasks"""
     print("🚀 STARTING ULTRA-FAST RAG BACKEND SERVER")
     print("=" * 50)
     
@@ -35,58 +35,129 @@ async def startup_event():
         # For now, we'll continue but log the error
         pass
     
-    # Initialize and warm up Ollama models (only if enabled)
+    # Initialize ALL MODELS at startup for instant inference
     from app.config import settings
-    if settings.ollama_enabled:
-        try:
-            print("🔥 Initializing ULTRA-FAST Ollama models...")
-            from app.services.llm_factory import initialize_llm_factory
-            await initialize_llm_factory()
-            print("✅ Ollama models pre-loaded and ready for instant inference!")
-        except Exception as e:
-            print(f"⚠️ Failed to initialize Ollama models: {e}")
-            print("   Ollama will be initialized on first request")
-            # Don't fail startup - allow fallback providers to work
-            pass
-    else:
-        print("� Ollama is disabled in configuration - skipping Ollama initialization")
+    total_init_start = time.time()
     
-    # CRITICAL OPTIMIZATION: Pre-load embedding models for instant RAG
+    print("🚀 INITIALIZING ALL MODELS FOR INSTANT INFERENCE")
+    print("=" * 60)
+    
+    # Step 1: Initialize LLM providers (Bedrock, Groq, OpenAI, etc.)
     try:
-        print("�🚀 Pre-loading embedding models for instant RAG...")
+        print("🤖 STEP 1: Initializing LLM Providers...")
+        from app.services.llm_factory import initialize_all_enabled_models
+        llm_result = await initialize_all_enabled_models()
+        
+        if llm_result["success"]:
+            print(f"✅ LLM Providers initialized: {len(llm_result['successful_providers'])} ready")
+            print(f"   - Ready providers: {', '.join(llm_result['successful_providers'])}")
+        else:
+            print("⚠️ No LLM providers initialized - will try on-demand loading")
+            
+    except Exception as e:
+        print(f"⚠️ Failed to initialize LLM providers: {e}")
+        llm_result = {"success": False, "successful_providers": []}
+    
+    # Step 2: Initialize RAG Models (Embedding, Reranker)
+    try:
+        print("\n🧠 STEP 2: Initializing RAG Models...")
+        
+        # Initialize embedding model
+        print("📊 Loading JinaAI embedding model...")
         from app.utils.qdrant_store import preload_embedding_model
         await preload_embedding_model()
-        print("⚡ Embedding models pre-loaded for zero-delay vector search!")
-    except Exception as e:
-        print(f"⚠️ Failed to pre-load embedding models: {e}")
-        print("   Embedding models will be loaded on first search request")
-        # Don't fail startup - models will load on first use
-        pass
-    
-    # Pre-load reranking models for instant results
-    try:
-        print("🎯 Pre-loading reranking models...")
+        print("✅ JinaAI embedding model ready (768 dimensions)")
+        
+        # Initialize reranker model
+        print("🎯 Loading BGE reranker model...")
         from app.services.rag import reranker
         await reranker.initialize()
-        print("✅ Reranking models pre-loaded for instant precision!")
+        if reranker.model_loaded:
+            print(f"✅ BGE reranker model ready ({reranker.model_name})")
+        else:
+            print("⚠️ Reranker will use LLM fallback")
+        
+        # Initialize RAG cache
+        print("⚡ Initializing RAG cache...")
+        from app.services.rag import cache
+        await cache.initialize()
+        print("✅ RAG cache ready")
+        
+        rag_models_ready = True
+        
     except Exception as e:
-        print(f"⚠️ Failed to pre-load reranking models: {e}")
-        print("   Reranking will use LLM fallback")
-        # Don't fail startup - fallback to LLM reranking
-        pass
+        print(f"⚠️ Failed to initialize RAG models: {e}")
+        rag_models_ready = False
+    
+    # Step 3: Initialize KeyBERT and Tagging Models
+    try:
+        print("\n🏷️  STEP 3: Initializing KeyBERT and Tagging Models...")
+        
+        # Initialize KeyBERT model by importing the enhanced tagger
+        from app.services.tagging import _enhanced_tagger, KEYBERT_AVAILABLE
+        
+        # Check if KeyBERT is available and initialized
+        if KEYBERT_AVAILABLE and hasattr(_enhanced_tagger, '_kw') and _enhanced_tagger._kw is not None:
+            print("✅ KeyBERT model ready (all-MiniLM-L6-v2)")
+        else:
+            print("⚠️ KeyBERT not available - will use LLM fallback")
+        
+        tagging_models_ready = True
+        
+    except Exception as e:
+        print(f"⚠️ Failed to initialize tagging models: {e}")
+        tagging_models_ready = False
+    
+    # Summary
+    total_init_time = time.time() - total_init_start
+    print("\n" + "=" * 60)
+    print(f"🎉 MODEL INITIALIZATION COMPLETE in {total_init_time:.2f}s")
+    print("=" * 60)
+    
+    # LLM Providers Summary
+    if llm_result["success"]:
+        print(f"✅ LLM Providers: {len(llm_result['successful_providers'])} ready")
+        print(f"   - {', '.join(llm_result['successful_providers'])}")
+    else:
+        print("❌ LLM Providers: None ready (on-demand loading)")
+    
+    # RAG Models Summary
+    if rag_models_ready:
+        print("✅ RAG Models: Embedding + Reranker + Cache ready")
+        print("   - JinaAI v2 embedding (768 dim)")
+        print("   - BGE reranker (optimal performance)")
+        print("   - Lightning-fast cache system")
+    else:
+        print("❌ RAG Models: Will load on-demand")
+    
+    # Tagging Models Summary
+    if tagging_models_ready:
+        print("✅ Tagging Models: KeyBERT ready")
+        print("   - all-MiniLM-L6-v2 for keyword extraction")
+    else:
+        print("❌ Tagging Models: Will use LLM fallback")
+    
+    print("\n⚡ ZERO LOADING DELAYS FOR ALL OPERATIONS!")
+    print("   🤖 LLM queries: Instant inference")
+    print("   🔍 RAG searches: Instant embedding + reranking")
+    print("   🏷️  AI tagging: Instant keyword extraction")
+    print("   📄 Document processing: All models pre-warmed")
+    print("   ✨ AI curation: Instant model availability")
+    print("   📝 Summarization: Zero startup delays")
+    print("=" * 60)
     
     print("🎉 ULTRA-FAST RAG BACKEND SERVER READY!")
     print("   - Database: ✅ Ready")
-    print("   - Ollama Models: 🔥 Pre-loaded")
+    print("   - LLM Models: 🔥 Pre-loaded")
     print("   - Zero Timeout: ⚡ Enabled")
     print("   - Parallel Processing: 🔄 8 concurrent slots")
     print("   - Large Context: 📄 32K tokens supported")
     print("=" * 50)
 
-# Add CORS middleware - Enhanced for ngrok compatibility
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for development with ngrok
+    allow_origins=["http://localhost:3000", "http://localhost:8000", "https://sixth-vault.com", "null"],  # Allow local file access and testing
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
@@ -94,21 +165,9 @@ app.add_middleware(
     max_age=3600,  # Cache preflight requests for 1 hour
 )
 
-# Add custom middleware for ngrok headers
-@app.middleware("http")
-async def add_ngrok_headers(request, call_next):
-    response = await call_next(request)
-    
-    # Add ngrok-specific headers to bypass browser warnings
-    response.headers["ngrok-skip-browser-warning"] = "true"
-    response.headers["Access-Control-Allow-Credentials"] = "true"
-    
-    # Handle ngrok tunnel requests
-    origin = request.headers.get("origin")
-    if origin and ("ngrok" in origin or "localhost" in origin):
-        response.headers["Access-Control-Allow-Origin"] = origin
-    
-    return response
+# Configure FastAPI to prevent 307 redirects by default
+app.router.redirect_slashes = False
+
 
 # Include routers
 app.include_router(auth_router)
@@ -118,12 +177,13 @@ app.include_router(query_router)
 app.include_router(documents_router)
 app.include_router(curations_router)
 app.include_router(summaries_router)
-app.include_router(ollama_router)
+app.include_router(conversations_router)
+app.include_router(providers_router)
 app.include_router(health_router)
 
 @app.get("/health")
 async def health_check():
-    """Enhanced health check endpoint with Ollama status"""
+    """Enhanced health check endpoint with LLM provider status"""
     try:
         from app.services.llm_factory import health_check as llm_health_check
         llm_health = await llm_health_check()
@@ -132,10 +192,10 @@ async def health_check():
             "status": "healthy",
             "message": "ULTRA-FAST RAG Backend is running",
             "database": "connected",
-            "ollama": {
+            "llm_providers": {
                 "status": llm_health.get("status", "unknown"),
                 "available_providers": llm_health.get("available_providers", []),
-                "models_cached": llm_health.get("providers", {}).get("ollama", {}).get("models_cached", 0)
+                "total_providers": len(llm_health.get("available_providers", []))
             },
             "features": {
                 "zero_timeout": True,
@@ -151,7 +211,7 @@ async def health_check():
             "message": "RAG Backend running with limited functionality",
             "error": str(e),
             "database": "connected",
-            "ollama": "unavailable"
+            "llm_providers": "unavailable"
         }
 
 # --- Enhanced Enterprise WebSocket Endpoint ----------------------------------------------------

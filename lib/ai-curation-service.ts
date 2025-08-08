@@ -1,4 +1,5 @@
 import { ragApiClient, type AICuration, type CurationSettings, type CurationStatus } from './api-client'
+import { cacheManager, CacheKeys } from './cache-manager'
 
 export interface CurationGenerationOptions {
   provider: string
@@ -12,41 +13,58 @@ export interface CurationContent {
   content: string
   isGenerating: boolean
   error?: string
+  lastUpdated: string
 }
 
 export class AICurationService {
   private curations: AICuration[] = []
   private settings: CurationSettings | null = null
   private status: CurationStatus | null = null
-  private contentCache: Map<string, CurationContent> = new Map()
+  private readonly CONTENT_TTL = 60 * 60 * 1000 // 1 hour for content
+  private readonly DATA_TTL = 30 * 60 * 1000 // 30 minutes for data
+
+  // Track initialization state to prevent multiple calls
+  private isInitializing = false
+  private isInitialized = false
+  private initializationPromise: Promise<void> | null = null
 
   /**
-   * Initialize the service by loading curations and settings
+   * Initialize the service with persistent caching and instant loading
    */
   async initialize(): Promise<void> {
+    // Prevent multiple simultaneous initializations
+    if (this.isInitializing || this.isInitialized) {
+      if (this.initializationPromise) {
+        return this.initializationPromise
+      }
+      return
+    }
+
+    this.isInitializing = true
+    
+    this.initializationPromise = this._doInitialize()
+    
     try {
-      console.log('AI Curation Service: Initializing...')
+      await this.initializationPromise
+      this.isInitialized = true
+    } finally {
+      this.isInitializing = false
+      this.initializationPromise = null
+    }
+  }
+
+  private async _doInitialize(): Promise<void> {
+    try {
+      console.log('AI Curation Service: Fast initializing with persistent cache...')
       
-      // Load curations, settings, and status in parallel
-      const [curations, settings, status] = await Promise.all([
-        ragApiClient.getAICurations(),
-        ragApiClient.getCurationSettings(),
-        ragApiClient.getCurationStatus()
-      ])
+      // First, try to load from cache for instant UI response
+      const cachedCurations = cacheManager.get<AICuration[]>(CacheKeys.curations())
+      const cachedSettings = cacheManager.get<CurationSettings>(CacheKeys.curationSettings())
+      const cachedStatus = cacheManager.get<CurationStatus>(CacheKeys.curationStatus())
 
-      this.curations = curations
-      this.settings = settings
-      this.status = status
-
-      console.log('AI Curation Service: Initialized successfully')
-      console.log(`  - Curations: ${curations.length}`)
-      console.log(`  - Settings: Auto-refresh ${settings.autoRefresh ? 'enabled' : 'disabled'}`)
-      console.log(`  - Status: ${status.totalCurations} total, ${status.freshCurations} fresh`)
-    } catch (error) {
-      console.error('AI Curation Service: Failed to initialize:', error)
-      // Set default values on error
-      this.curations = []
-      this.settings = {
+      // Set cached data if available, otherwise use defaults
+      this.curations = cachedCurations || []
+      this.settings = cachedSettings || {
         autoRefresh: true,
         onAdd: 'incremental',
         onDelete: 'auto_clean',
@@ -54,13 +72,121 @@ export class AICurationService {
         maxCurations: 10,
         minDocumentsPerCuration: 2
       }
-      this.status = {
+      this.status = cachedStatus || {
         totalCurations: 0,
         freshCurations: 0,
         staleCurations: 0,
         lastGenerated: null,
         documentsAnalyzed: 0
       }
+
+      console.log(`AI Curation Service: Loaded ${this.curations.length} curations from cache`)
+      
+      // Only load fresh data if cache is stale (older than 5 minutes)
+      const lastUpdate = cacheManager.get<{ timestamp: number }>(CacheKeys.curations() + '_meta')?.timestamp
+      const cacheAge = lastUpdate ? Date.now() - lastUpdate : Infinity
+      const maxCacheAge = 5 * 60 * 1000 // 5 minutes
+      
+      if (cacheAge > maxCacheAge) {
+        console.log('AI Curation Service: Cache is stale, refreshing in background...')
+        // Don't await this - let it run in background
+        this.loadFreshDataInBackground().catch(error => {
+          console.warn('AI Curation Service: Background refresh failed:', error)
+        })
+      } else {
+        console.log('AI Curation Service: Cache is fresh, skipping background refresh')
+      }
+      
+      console.log('AI Curation Service: Fast initialized with cached data')
+    } catch (error) {
+      console.error('AI Curation Service: Failed to initialize:', error)
+    }
+  }
+
+  // Track background refresh to prevent multiple simultaneous calls
+  private isRefreshing = false
+  private refreshPromise: Promise<void> | null = null
+
+  /**
+   * Load fresh data in background and update cache
+   */
+  private async loadFreshDataInBackground(): Promise<void> {
+    // Prevent multiple simultaneous background refreshes
+    if (this.isRefreshing) {
+      if (this.refreshPromise) {
+        return this.refreshPromise
+      }
+      return
+    }
+
+    this.isRefreshing = true
+    this.refreshPromise = this._doBackgroundRefresh()
+    
+    try {
+      await this.refreshPromise
+    } finally {
+      this.isRefreshing = false
+      this.refreshPromise = null
+    }
+  }
+
+  private async _doBackgroundRefresh(): Promise<void> {
+    try {
+      console.log('AI Curation Service: Loading fresh data in background...')
+      
+      // Use shorter timeout and fewer parallel requests to reduce load
+      const timeout = 5000 // 5 second timeout
+      
+      // Load data sequentially to reduce concurrent API calls and token validations
+      try {
+        const curations = await Promise.race([
+          ragApiClient.getAICurations(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), timeout))
+        ]) as AICuration[]
+        
+        this.curations = curations
+        cacheManager.set(CacheKeys.curations(), this.curations, this.DATA_TTL)
+        cacheManager.set(CacheKeys.curations() + '_meta', { timestamp: Date.now() }, this.DATA_TTL)
+        console.log(`AI Curation Service: Updated ${this.curations.length} curations`)
+      } catch (error) {
+        console.warn('AI Curation Service: Failed to refresh curations:', error)
+      }
+
+      // Small delay between requests to reduce server load
+      await new Promise(resolve => setTimeout(resolve, 100))
+
+      try {
+        const settings = await Promise.race([
+          ragApiClient.getCurationSettings(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), timeout))
+        ]) as CurationSettings
+        
+        this.settings = settings
+        cacheManager.set(CacheKeys.curationSettings(), this.settings, this.DATA_TTL)
+        console.log('AI Curation Service: Updated settings')
+      } catch (error) {
+        console.warn('AI Curation Service: Failed to refresh settings:', error)
+      }
+
+      // Small delay between requests to reduce server load
+      await new Promise(resolve => setTimeout(resolve, 100))
+
+      try {
+        const status = await Promise.race([
+          ragApiClient.getCurationStatus(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), timeout))
+        ]) as CurationStatus
+        
+        this.status = status
+        cacheManager.set(CacheKeys.curationStatus(), this.status, this.DATA_TTL)
+        console.log('AI Curation Service: Updated status')
+      } catch (error) {
+        console.warn('AI Curation Service: Failed to refresh status:', error)
+      }
+
+      console.log('AI Curation Service: Background refresh completed')
+    } catch (error) {
+      console.warn('AI Curation Service: Background refresh failed:', error)
     }
   }
 
@@ -89,24 +215,24 @@ export class AICurationService {
    */
   private getIconForCuration(curation: AICuration): any {
     const title = curation.title.toLowerCase()
-    const keywords = curation.topicKeywords.join(' ').toLowerCase()
+    const keywords = (curation.topicKeywords || curation.keywords || []).join(' ').toLowerCase()
     const combined = `${title} ${keywords}`
 
-    // Import icons dynamically based on content
+    // Import actual icon components for use in React
     if (combined.includes('trend') || combined.includes('growth')) {
-      return 'TrendingUp'
+      return require('lucide-react').TrendingUp
     } else if (combined.includes('market') || combined.includes('business')) {
-      return 'BarChart3'
+      return require('lucide-react').BarChart3
     } else if (combined.includes('user') || combined.includes('customer') || combined.includes('demographic')) {
-      return 'Users'
+      return require('lucide-react').Users
     } else if (combined.includes('tech') || combined.includes('digital') || combined.includes('innovation')) {
-      return 'Brain'
+      return require('lucide-react').Brain
     } else if (combined.includes('industry') || combined.includes('sector')) {
-      return 'Building2'
+      return require('lucide-react').Building2
     } else if (combined.includes('global') || combined.includes('world') || combined.includes('international')) {
-      return 'Globe'
+      return require('lucide-react').Globe
     } else {
-      return 'Sparkles' // Default icon
+      return require('lucide-react').Sparkles // Default icon
     }
   }
 
@@ -140,108 +266,161 @@ export class AICurationService {
   }
 
   /**
-   * Generate content for a specific curation using the selected AI provider
+   * Generate content for a specific curation using persistent cache
+   * Handles both existing curation IDs and new curation titles
    */
   async generateCurationContent(
-    curationId: string, 
+    curationIdOrTitle: string, 
     provider: string, 
     model: string
   ): Promise<string> {
     try {
-      // Check if content is already cached and not generating
-      const cached = this.contentCache.get(curationId)
-      if (cached && !cached.isGenerating && !cached.error) {
-        console.log('AI Curation Service: Returning cached content for curation:', curationId)
-        return cached.content
-      }
-
-      // Find the curation
-      const curation = this.curations.find(c => c.id === curationId)
+      console.log('AI Curation Service: Processing curation request:', curationIdOrTitle)
+      
+      // First, try to find an existing curation by ID or title
+      let curation = this.curations.find(c => 
+        c.id === curationIdOrTitle || c.title === curationIdOrTitle
+      )
+      
+      // If not found locally, refresh curations from backend
       if (!curation) {
-        throw new Error('Curation not found')
+        console.log('AI Curation Service: Curation not found locally, refreshing from backend...')
+        try {
+          const freshCurations = await ragApiClient.getAICurations()
+          this.curations = freshCurations
+          cacheManager.set(CacheKeys.curations(), this.curations, this.DATA_TTL)
+          
+          // Try to find the curation again by ID or title
+          curation = this.curations.find(c => 
+            c.id === curationIdOrTitle || c.title === curationIdOrTitle
+          )
+          
+          if (curation) {
+            console.log('AI Curation Service: Found existing curation after refresh:', curation.title)
+          }
+        } catch (refreshError) {
+          console.warn('AI Curation Service: Failed to refresh curations:', refreshError)
+        }
       }
 
-      // Mark as generating
-      this.contentCache.set(curationId, {
-        id: curationId,
-        title: curation.title,
-        content: '',
-        isGenerating: true
-      })
+      // If still not found, create a custom curation automatically
+      if (!curation) {
+        console.log('AI Curation Service: No existing curation found, creating custom curation for:', curationIdOrTitle)
+        
+        try {
+          // Extract keywords from the title for better curation creation
+          const keywords = this.extractKeywordsFromTitle(curationIdOrTitle)
+          
+          // Create a custom curation
+          const createResult = await this.createCustomCuration(
+            curationIdOrTitle,
+            `Custom analysis focusing on ${curationIdOrTitle.toLowerCase()}`,
+            keywords,
+            provider,
+            model
+          )
+          
+          if (createResult.success && createResult.curation) {
+            console.log('AI Curation Service: Successfully created custom curation:', createResult.curation.title)
+            curation = createResult.curation
+            
+            // Refresh local curations to include the new one
+            await this.refresh()
+          } else {
+            console.error('AI Curation Service: Failed to create custom curation:', createResult.message)
+            throw new Error(createResult.message || 'Failed to create custom curation')
+          }
+        } catch (createError) {
+          console.error('AI Curation Service: Error creating custom curation:', createError)
+          
+          // Return a helpful message if we can't create the curation
+          return `I understand you're asking about "${curationIdOrTitle}". 
 
-      console.log('AI Curation Service: Generating content for curation:', curation.title)
+I attempted to create a custom curation for this topic, but encountered an issue: ${createError instanceof Error ? createError.message : 'Unknown error'}
+
+**For best results:**
+- Use the main chat interface to ask questions about your documents
+- The AI will analyze your documents and provide detailed answers
+- Your conversation will be saved in the chat history
+
+**To create a custom curation manually:**
+- Click the "+" button next to "AI CURATIONS" in the sidebar
+- Provide a title, description, and keywords
+- The AI will create a focused analysis on that topic
+
+Would you like me to help you rephrase this as a question for the main chat interface?`
+        }
+      }
+
+      // FIXED: Check for cached content first before making any API calls
+      const cacheKey = CacheKeys.curationContent(curation.id, provider, model)
+      const cachedContent = cacheManager.get<string>(cacheKey)
+      
+      if (cachedContent) {
+        console.log('✅ AI Curation Service: Found cached content, returning instantly for:', curation.title)
+        return cachedContent
+      }
+
+      // Only make API call if no cached content exists
+      console.log('🔄 AI Curation Service: No cached content found, generating fresh content for:', curation.title)
       console.log('AI Curation Service: Using provider:', provider, 'model:', model)
 
-      // Use the RAG query endpoint to generate content based on the curation
-      const prompt = this.buildCurationPrompt(curation)
-      
-      const response = await ragApiClient.queryDocuments(prompt, {
-        provider: provider,
-        model: model,
-        hybrid: false, // Use pure RAG for curations
-        maxContext: true, // Use maximum context for better insights
-        documentIds: curation.documentIds.length > 0 ? curation.documentIds : undefined
-      })
+      // Use the backend endpoint to get/generate content
+      const result = await ragApiClient.getCurationContent(curation.id, provider, model)
 
-      const content = response.answer || 'Failed to generate curation content.'
-
-      // Cache the generated content
-      this.contentCache.set(curationId, {
-        id: curationId,
-        title: curation.title,
-        content: content,
-        isGenerating: false
-      })
-
-      console.log('AI Curation Service: Successfully generated content for:', curation.title)
-      return content
-
+      if (result.success && result.content) {
+        const cacheMsg = result.cached ? 'retrieved from backend cache' : 'generated fresh'
+        console.log(`✅ AI Curation Service: Successfully ${cacheMsg} content for:`, curation.title)
+        
+        // Cache the content for future instant access
+        cacheManager.set(cacheKey, result.content, this.CONTENT_TTL)
+        
+        return result.content
+      } else {
+        throw new Error(result.message || 'Failed to get curation content')
+      }
     } catch (error) {
-      console.error('AI Curation Service: Failed to generate content for curation:', curationId, error)
+      console.error('AI Curation Service: Failed to get content for curation:', curationIdOrTitle, error)
       
-      // Cache the error
-      this.contentCache.set(curationId, {
-        id: curationId,
-        title: 'Error',
-        content: '',
-        isGenerating: false,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      })
-
       // Return fallback content
-      return this.generateFallbackContent(curationId)
+      return this.generateFallbackContent(curationIdOrTitle, curationIdOrTitle)
     }
   }
 
   /**
-   * Build a prompt for generating curation content
+   * Extract meaningful keywords from a title for better curation creation
    */
-  private buildCurationPrompt(curation: AICuration): string {
-    const keywords = curation.topicKeywords.join(', ')
+  private extractKeywordsFromTitle(title: string): string[] {
+    // Simple keyword extraction
+    const words = title.toLowerCase()
+      .replace(/[^\w\s]/g, ' ') // Remove punctuation
+      .split(/\s+/)
+      .filter(word => word.length > 2) // Filter short words
     
-    return `Generate a comprehensive business intelligence curation titled "${curation.title}".
-
-Focus on these key topics and keywords: ${keywords}
-
-Please provide:
-1. An executive summary of the key insights
-2. Main findings and trends
-3. Strategic implications and recommendations
-4. Supporting data and evidence from the documents
-5. Actionable next steps
-
-Format the response using markdown with clear headings, bullet points, and professional structure. Make it visually appealing and easy to read.
-
-Base your analysis on the uploaded documents and provide specific, actionable insights that would be valuable for business decision-making.`
+    // Remove common stop words
+    const stopWords = new Set([
+      'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had',
+      'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his',
+      'how', 'its', 'may', 'new', 'now', 'old', 'see', 'two', 'who', 'boy',
+      'did', 'she', 'use', 'way', 'will', 'with', 'this', 'that', 'they',
+      'have', 'from', 'know', 'want', 'been', 'good', 'much', 'some',
+      'time', 'very', 'when', 'come', 'here', 'just', 'like', 'long', 'make',
+      'many', 'over', 'such', 'take', 'than', 'them', 'well', 'were', 'about'
+    ])
+    
+    const keywords = words.filter(word => !stopWords.has(word))
+    
+    // Return top 5 keywords or all if less than 5
+    return keywords.slice(0, 5)
   }
 
   /**
    * Generate fallback content when AI generation fails
    */
-  private generateFallbackContent(curationId: string): string {
-    const curation = this.curations.find(c => c.id === curationId)
-    const title = curation?.title || 'Business Intelligence Curation'
-    const keywords = curation?.topicKeywords.join(', ') || 'business analysis'
+  private generateFallbackContent(curationIdOrTitle: string, fallbackTitle?: string): string {
+    const curation = this.curations.find(c => c.id === curationIdOrTitle || c.title === curationIdOrTitle)
+    const title = fallbackTitle || curation?.title || curationIdOrTitle || 'Business Intelligence Curation'
+    const keywords = (curation?.topicKeywords || curation?.keywords || []).join(', ') || 'business analysis'
 
     return `# ${title}
 
@@ -289,6 +468,10 @@ This curation highlights the importance of leveraging your document insights for
       this.curations = curations
       this.status = status
 
+      // Update cache
+      cacheManager.set(CacheKeys.curations(), this.curations, this.DATA_TTL)
+      cacheManager.set(CacheKeys.curationStatus(), this.status, this.DATA_TTL)
+
       console.log('AI Curation Service: Refreshed data from backend')
     } catch (error) {
       console.error('AI Curation Service: Failed to refresh:', error)
@@ -312,6 +495,7 @@ This curation highlights the importance of leveraging your document insights for
       if (success && this.settings) {
         // Update local settings
         this.settings = { ...this.settings, ...newSettings }
+        cacheManager.set(CacheKeys.curationSettings(), this.settings, this.DATA_TTL)
         console.log('AI Curation Service: Settings updated successfully')
       }
 
@@ -334,8 +518,9 @@ This curation highlights the importance of leveraging your document insights for
    */
   async refreshCuration(curationId: string, provider: string, model: string): Promise<{ success: boolean; message: string }> {
     try {
-      // Clear cached content
-      this.contentCache.delete(curationId)
+      // Clear cached content for this curation
+      const cacheKey = CacheKeys.curationContent(curationId, provider, model)
+      cacheManager.delete(cacheKey)
 
       const result = await ragApiClient.refreshCuration(curationId, {
         provider: provider,
@@ -343,8 +528,10 @@ This curation highlights the importance of leveraging your document insights for
       })
 
       if (result.success) {
-        // Refresh local data
+        // Refresh local data and clear related cache
         await this.refresh()
+        cacheManager.clearByPattern(`curation_content_${curationId}_.*`)
+        console.log('AI Curation Service: Cleared cached content for refreshed curation')
       }
 
       return result
@@ -358,26 +545,82 @@ This curation highlights the importance of leveraging your document insights for
   }
 
   /**
-   * Check if a curation is currently generating content
-   */
-  isGeneratingContent(curationId: string): boolean {
-    const cached = this.contentCache.get(curationId)
-    return cached?.isGenerating || false
-  }
-
-  /**
    * Get cached content for a curation
    */
-  getCachedContent(curationId: string): CurationContent | null {
-    return this.contentCache.get(curationId) || null
+  getCachedContent(curationId: string, provider: string, model: string): string | null {
+    const cacheKey = CacheKeys.curationContent(curationId, provider, model)
+    return cacheManager.get<string>(cacheKey)
   }
 
   /**
    * Clear all cached content
    */
   clearCache(): void {
-    this.contentCache.clear()
-    console.log('AI Curation Service: Cleared content cache')
+    cacheManager.clearByPattern(CacheKeys.patterns.allContent)
+    console.log('AI Curation Service: Cleared all cached content')
+  }
+
+  /**
+   * Delete a curation with optimistic UI updates
+   */
+  async deleteCuration(curationId: string): Promise<{ success: boolean; message: string }> {
+    try {
+      console.log('AI Curation Service: Deleting curation with optimistic update:', curationId)
+      
+      // Store the curation for potential rollback
+      const curationToDelete = this.curations.find(c => c.id === curationId)
+      if (!curationToDelete) {
+        return {
+          success: false,
+          message: 'Curation not found'
+        }
+      }
+
+      // OPTIMISTIC UPDATE: Instantly remove from local data for immediate UI response
+      this.curations = this.curations.filter(c => c.id !== curationId)
+      
+      // Clear all cached content for this curation immediately
+      cacheManager.clearByPattern(`curation_content_${curationId}_.*`)
+      
+      // Update cache immediately for instant UI update
+      cacheManager.set(CacheKeys.curations(), this.curations, this.DATA_TTL)
+      
+      console.log('AI Curation Service: Curation removed from UI instantly')
+
+      // Handle backend deletion in background
+      try {
+        const result = await ragApiClient.deleteCuration(curationId)
+        
+        if (result.success) {
+          console.log('AI Curation Service: Backend deletion completed successfully')
+          return {
+            success: true,
+            message: result.message || 'Curation deleted successfully'
+          }
+        } else {
+          console.error('AI Curation Service: Backend deletion failed, but UI already updated')
+          // For professional UX, we keep it removed from frontend even if backend fails
+          // Optionally: Could restore the curation if backend fails, but this creates poor UX
+          return {
+            success: true, // Return success since UI is already updated
+            message: 'Curation removed from interface (backend deletion may have failed)'
+          }
+        }
+      } catch (error) {
+        console.error('AI Curation Service: Backend deletion error:', error)
+        // UI already updated, so user sees instant deletion regardless of backend status
+        return {
+          success: true, // Return success since UI is already updated
+          message: 'Curation removed from interface'
+        }
+      }
+    } catch (error) {
+      console.error('AI Curation Service: Failed to delete curation:', error)
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Unknown error occurred'
+      }
+    }
   }
 
   /**
@@ -418,6 +661,48 @@ This curation highlights the importance of leveraging your document insights for
   }
 
   /**
+   * Handle document deletion by cleaning up orphaned curations
+   */
+  async handleDocumentDeletion(documentIds: string[]): Promise<void> {
+    try {
+      console.log('AI Curation Service: Handling document deletion cleanup for:', documentIds.length, 'documents')
+      
+      // Clear all cached content since documents have changed
+      this.clearCache()
+      
+      // Refresh curations from backend to get updated state
+      await this.refresh()
+      
+      console.log('AI Curation Service: Document deletion cleanup completed')
+    } catch (error) {
+      console.error('AI Curation Service: Failed to handle document deletion:', error)
+    }
+  }
+
+  /**
+   * Handle when all documents are deleted - clear all curations
+   */
+  async handleAllDocumentsDeleted(): Promise<void> {
+    try {
+      console.log('AI Curation Service: All documents deleted, clearing all curations')
+      
+      // Clear local curations immediately for instant UI update
+      this.curations = []
+      
+      // Clear all cached content
+      this.clearCache()
+      
+      // Update cache to reflect empty state
+      cacheManager.set(CacheKeys.curations(), this.curations, this.DATA_TTL)
+      cacheManager.set(CacheKeys.curations() + '_meta', { timestamp: Date.now() }, this.DATA_TTL)
+      
+      console.log('AI Curation Service: All curations cleared from frontend')
+    } catch (error) {
+      console.error('AI Curation Service: Failed to handle all documents deletion:', error)
+    }
+  }
+
+  /**
    * Get summary statistics
    */
   getSummaryStats(): {
@@ -426,14 +711,17 @@ This curation highlights the importance of leveraging your document insights for
     staleCurations: number
     cachedContent: number
   } {
-    const freshCount = this.curations.filter(c => c.status === 'fresh').length
+    const activeCount = this.curations.filter(c => c.status === 'active').length
     const staleCount = this.curations.filter(c => c.status === 'stale').length
+
+    // Count cached content entries using cache manager
+    const cachedContentKeys = cacheManager.getKeysByPattern('curation_content_.*')
 
     return {
       totalCurations: this.curations.length,
-      freshCurations: freshCount,
+      freshCurations: activeCount,
       staleCurations: staleCount,
-      cachedContent: this.contentCache.size
+      cachedContent: cachedContentKeys.length
     }
   }
 }

@@ -404,8 +404,9 @@ async def upload(
     background: BackgroundTasks,
     files: list[UploadFile] = File(...),
     user = Depends(get_current_user),
+    sequential: bool = Query(default=False, description="Process files sequentially (one at a time)")
 ):
-    """Enterprise-grade file upload endpoint with enhanced progress tracking"""
+    """Enhanced file upload endpoint with sequential processing option"""
     batch = str(uuid4())
     upload_start_time = time.time()
     
@@ -426,14 +427,16 @@ async def upload(
         else:
             valid_files.append(f)
     
-    # Send initial upload notification with validation results
+    # Send initial upload notification with processing mode
+    processing_mode = "sequential" if sequential else "parallel"
     await enterprise_push(batch, "upload_started", {
-        "message": "File upload initiated with AWS Bedrock",
+        "message": f"File upload initiated with {processing_mode} processing",
         "batch_id": batch,
         "total_files": len(files),
         "valid_files": len(valid_files),
         "invalid_files": len(invalid_files),
         "invalid_file_details": invalid_files,
+        "processing_mode": processing_mode,
         "provider": "bedrock",
         "model": "anthropic.claude-3-haiku-20240307-v1:0",
         "user_id": str(user.id),
@@ -458,17 +461,68 @@ async def upload(
             "details": invalid_files
         }
     
-    # Send queued message for valid files
+    # Choose processing strategy based on sequential flag
+    if sequential:
+        # SEQUENTIAL PROCESSING: Process one file at a time
+        await sequential_file_processing(background, batch, str(user.id), valid_files)
+    else:
+        # PARALLEL PROCESSING: Original behavior
+        await parallel_file_processing(background, batch, str(user.id), valid_files)
+    
+    # Send upload completion summary
+    upload_duration = time.time() - upload_start_time
+    await enterprise_push(batch, "upload_completed", {
+        "message": f"File upload phase completed ({processing_mode} mode)",
+        "batch_id": batch,
+        "total_files": len(files),
+        "valid_files": len(valid_files),
+        "processing_mode": processing_mode,
+        "upload_duration": upload_duration,
+        "next_phase": "processing"
+    }, priority="high")
+    
+    print(f"Upload completed for batch {batch}: {len(valid_files)} files queued for {processing_mode} processing")
+    
+    return {
+        "batch_id": batch, 
+        "count": len(files),
+        "valid_files": len(valid_files),
+        "processing_mode": processing_mode,
+        "upload_duration": upload_duration,
+        "status": "success"
+    }
+
+async def sequential_file_processing(background: BackgroundTasks, batch: str, user_id: str, valid_files: list[UploadFile]):
+    """Process files sequentially - one at a time with proper progress updates"""
+    
+    await enterprise_push(batch, "sequential_processing_started", {
+        "message": f"🔄 Starting sequential processing for {len(valid_files)} files",
+        "batch_id": batch,
+        "total_files": len(valid_files),
+        "processing_mode": "sequential",
+        "estimated_time_per_file": "30-60 seconds"
+    }, priority="high")
+    
+    # Initialize sequential batch tracking
+    file_names = [f.filename for f in valid_files]
+    initialize_batch_tracking(batch, len(valid_files), file_names)
+    
+    # Add sequential processing task
+    background.add_task(process_files_sequentially, user_id, batch, valid_files)
+
+async def parallel_file_processing(background: BackgroundTasks, batch: str, user_id: str, valid_files: list[UploadFile]):
+    """Process files in parallel - original behavior"""
+    
     await enterprise_push(batch, "queued", {
-        "message": f"Files queued for processing with AWS Bedrock",
+        "message": f"Files queued for parallel processing",
         "batch_id": batch,
         "files": [f.filename for f in valid_files],
+        "processing_mode": "parallel",
         "provider": "bedrock",
-        "model": "anthropic.claude-3-haiku-20240307-v1:0",
-        "queue_position": 1  # Could be enhanced with actual queue position
+        "model": "anthropic.claude-3-haiku-20240307-v1:0"
     }, priority="normal")
 
-    # Process each valid file with enhanced error handling
+    # Process each valid file in parallel (original behavior)
     processed_files = 0
     failed_files = 0
     
@@ -484,10 +538,10 @@ async def upload(
                 "progress": int((i / len(valid_files)) * 20)  # 20% for upload phase
             }, priority="normal")
             
-            file_info = await save_upload_file(str(user.id), batch, f)
+            file_info = await save_upload_file(str(user_id), batch, f)
             
-            # Add processing task
-            background.add_task(enhanced_process_file, str(user.id), batch, file_info)
+            # Add processing task in parallel
+            background.add_task(enhanced_process_file, user_id, batch, file_info)
             processed_files += 1
             
             # Send file uploaded confirmation
@@ -514,33 +568,181 @@ async def upload(
             }, priority="high")
             
             print(f"Failed to upload file {f.filename} for batch {batch}: {e}")
+
+async def process_files_sequentially(user_id: str, batch: str, files: list[UploadFile]):
+    """Process files one at a time in sequence"""
     
-    # Send upload completion summary
-    upload_duration = time.time() - upload_start_time
-    await enterprise_push(batch, "upload_completed", {
-        "message": "File upload phase completed",
+    for i, file in enumerate(files):
+        current_file_num = i + 1
+        
+        try:
+            # Send file processing start notification
+            await enterprise_push(batch, "sequential_file_started", {
+                "message": f"📁 Processing file {current_file_num}/{len(files)}: {file.filename}",
+                "batch_id": batch,
+                "filename": file.filename,
+                "file_index": current_file_num,
+                "total_files": len(files),
+                "progress": int((i / len(files)) * 100)
+            }, priority="high")
+            
+            # Save file
+            file_info = await save_upload_file(user_id, batch, file)
+            
+            # Send file uploaded notification
+            await enterprise_push(batch, "file_uploaded", {
+                "message": f"File uploaded successfully: {file.filename}",
+                "batch_id": batch,
+                "filename": file.filename,
+                "file_path": file_info["local_path"],
+                "s3_key": file_info["s3_key"],
+                "file_size": file.size,
+                "file_index": current_file_num,
+                "total_files": len(files)
+            }, priority="normal")
+            
+            # Process this file synchronously (wait for completion)
+            await process_single_file_sync(user_id, batch, file_info, current_file_num, len(files))
+            
+            # Send file completion notification
+            await enterprise_push(batch, "sequential_file_completed", {
+                "message": f"✅ File {current_file_num}/{len(files)} completed: {file.filename}",
+                "batch_id": batch,
+                "filename": file.filename,
+                "file_index": current_file_num,
+                "total_files": len(files),
+                "progress": int((current_file_num / len(files)) * 100)
+            }, priority="high")
+            
+            # Mark file as completed in batch tracking
+            await mark_file_completed(batch, i, is_priority=(i == 0))
+            
+            print(f"✅ Sequential processing completed for file {current_file_num}/{len(files)}: {file.filename}")
+            
+            # Brief pause between files for better UX (except for last file)
+            if i < len(files) - 1:
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            # Send file error notification
+            await enterprise_push(batch, "sequential_file_error", {
+                "message": f"❌ File {current_file_num}/{len(files)} failed: {file.filename}",
+                "batch_id": batch,
+                "filename": file.filename,
+                "file_index": current_file_num,
+                "total_files": len(files),
+                "error": str(e)
+            }, priority="critical")
+            
+            print(f"❌ Sequential processing failed for file {current_file_num}/{len(files)}: {file.filename} - {e}")
+            continue
+    
+    # Send sequential processing completion
+    await enterprise_push(batch, "sequential_processing_completed", {
+        "message": f"🎉 Sequential processing completed for all {len(files)} files",
         "batch_id": batch,
         "total_files": len(files),
-        "valid_files": len(valid_files),
-        "processed_files": processed_files,
-        "failed_files": failed_files,
-        "invalid_files": len(invalid_files),
-        "upload_duration": upload_duration,
-        "next_phase": "processing"
-    }, priority="high")
+        "processing_mode": "sequential"
+    }, priority="critical")
+
+async def process_single_file_sync(user_id: str, batch: str, file_info: Dict[str, Any], file_index: int, total_files: int):
+    """Process a single file synchronously and wait for completion"""
+    processing_start_time = time.time()
     
-    print(f"Upload completed for batch {batch}: {processed_files} files queued for processing")
+    # Extract file information
+    local_path = file_info["local_path"]
+    s3_key = file_info["s3_key"]
+    s3_bucket = file_info["s3_bucket"]
+    filename = file_info["filename"]
+    file_size = file_info["file_size"]
+    content_type = file_info["content_type"]
     
-    return {
-        "batch_id": batch, 
-        "count": len(files),
-        "valid_files": len(valid_files),
-        "processed_files": processed_files,
-        "failed_files": failed_files,
-        "invalid_files": len(invalid_files),
-        "upload_duration": upload_duration,
-        "status": "success" if processed_files > 0 else "partial_failure"
-    }
+    # Generate document ID for tracking
+    doc_id = f"{filename}_{batch}_{file_index}"
+    
+    try:
+        # Register document in processing tracker
+        await ProcessingService.register_processing_document(
+            doc_id=doc_id,
+            filename=filename,
+            batch_id=batch,
+            owner_id=user_id,
+            file_path=local_path,
+            s3_key=s3_key,
+            s3_bucket=s3_bucket,
+            file_size=file_size,
+            content_type=content_type
+        )
+        
+        # Update to processing status
+        await ProcessingService.update_processing_status(doc_id, ProcessingStatus.PROCESSING, 10, "processing")
+        
+        # Send processing start notification
+        await enterprise_push(batch, "processing", {
+            "message": f"🔄 AI processing file {file_index}/{total_files}: {filename}",
+            "batch_id": batch,
+            "filename": filename,
+            "file_index": file_index,
+            "total_files": total_files,
+            "progress": 30,
+            "provider": "bedrock",
+            "model": "anthropic.claude-3-haiku-20240307-v1:0"
+        }, priority="high")
+        
+        # Process the file with lightning fast processing
+        result = await lightning_process_file(user_id, batch, local_path, "bedrock", "anthropic.claude-3-haiku-20240307-v1:0")
+        
+        # Update to completed status
+        await ProcessingService.update_processing_status(doc_id, ProcessingStatus.COMPLETED, 100, "completed")
+        
+        # Send completion notification with AI data
+        processing_duration = time.time() - processing_start_time
+        await enterprise_push(batch, "completed", {
+            "message": f"✅ AI processing completed for {filename}",
+            "batch_id": batch,
+            "filename": filename,
+            "file": filename,  # For frontend compatibility
+            "file_index": file_index,
+            "total_files": total_files,
+            "progress": 100,
+            "duration": processing_duration,
+            "doc_id": doc_id,
+            "ai_analysis_complete": True
+        }, priority="critical")
+        
+        # Clean up processing tracker
+        await ProcessingService.remove_processing_document(doc_id, user_id)
+        
+        # Clean up temporary local file (keep S3 file)
+        await cleanup_file_resources(local_path=local_path)
+        
+        print(f"✅ Synchronous processing completed for {filename} in {processing_duration:.2f}s")
+        
+    except Exception as e:
+        # Update status to error
+        try:
+            await ProcessingService.update_processing_status(doc_id, ProcessingStatus.ERROR, 0, "error", str(e))
+        except:
+            pass
+        
+        # Clean up resources on error
+        await cleanup_file_resources(s3_key=s3_key, local_path=local_path)
+        
+        # Send error notification
+        processing_duration = time.time() - processing_start_time
+        await enterprise_push(batch, "error", {
+            "message": f"❌ Processing failed for {filename}: {str(e)}",
+            "batch_id": batch,
+            "filename": filename,
+            "file": filename,  # For frontend compatibility
+            "file_index": file_index,
+            "total_files": total_files,
+            "error": str(e),
+            "duration": processing_duration
+        }, priority="critical")
+        
+        print(f"❌ Synchronous processing failed for {filename} after {processing_duration:.2f}s: {e}")
+        raise
 
 @router.post("/upload/bulk")
 async def bulk_upload_enhanced(

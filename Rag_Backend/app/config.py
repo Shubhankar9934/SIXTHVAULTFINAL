@@ -42,25 +42,20 @@ class Settings(BaseSettings):
     bedrock_model_id: str = "anthropic.claude-3-haiku-20240307-v1:0"
     bedrock_max_tokens: int = 4096
     bedrock_temperature: float = 0.1
-    bedrock_enabled: bool = True  # Default to True for document processing
+    bedrock_enabled: bool = True  # Master switch to enable/disable Bedrock functionality
     
-    # Ollama Configuration - ULTRA-FAST PARALLEL PROCESSING SETTINGS
-    ollama_enabled: bool = False  # Master switch to enable/disable Ollama functionality
-    ollama_host: str = "http://localhost:11434"
-    ollama_timeout: int = 0  # NO TIMEOUT - Wait indefinitely for output
-    ollama_max_retries: int = 2  # Reduced retries for speed
-    ollama_default_model: str = "llama3.2:3b"  # FASTER 3B model
-    ollama_fallback_model: str = "phi3:mini"  # Fast fallback
-    ollama_enable_gpu: bool = True  # Enable GPU acceleration
-    ollama_num_ctx: int = 8192  # OPTIMIZED to 8K for faster processing
-    ollama_num_predict: int = 512  # OPTIMIZED to 512 for faster responses
-    ollama_temperature: float = 0.1  # Lower temperature for consistent outputs
-    ollama_top_p: float = 0.9
-    ollama_repeat_penalty: float = 1.1
-    ollama_num_thread: int = 8  # Optimized threading for parallel tasks
-    ollama_num_gpu: int = 1  # Use single GPU for stability
-    ollama_batch_size: int = 128  # OPTIMIZED batch size for parallel processing
-    ollama_concurrent_requests: int = 32  # DOUBLED for true parallel processing
+    # Groq Configuration
+    groq_enabled: bool = True  # Master switch to enable/disable Groq functionality
+    
+    # OpenAI Configuration  
+    openai_enabled: bool = True  # Master switch to enable/disable OpenAI functionality
+    
+    # Gemini Configuration
+    gemini_enabled: bool = True  # Master switch to enable/disable Gemini functionality
+    
+    # DeepSeek Configuration
+    deepseek_enabled: bool = True  # Master switch to enable/disable DeepSeek functionality
+    
     
     # PERFORMANCE OPTIMIZATIONS
     # Document processing limits

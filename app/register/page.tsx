@@ -114,7 +114,7 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="h-screen bg-white relative overflow-hidden">
+    <div className="min-h-screen bg-white relative overflow-hidden lg:overflow-y-auto mobile-safe-top mobile-safe-bottom">
       {/* Beautiful flowing wave background */}
       <div className="absolute inset-0">
         <svg className="absolute inset-0 w-full h-full" viewBox="0 0 1440 800" preserveAspectRatio="xMidYMid slice">
@@ -196,245 +196,48 @@ export default function RegisterPage() {
         />
       )}
 
-      <div className="relative z-10 flex h-screen">
-        {/* Left Side - Features */}
-        <div className="hidden lg:flex lg:w-1/2 p-6">
-          <div className="w-full bg-white p-8 flex-col justify-center relative overflow-hidden rounded-2xl flex border border-gray-200 shadow-lg">
-            {/* Wavy lines background for main container */}
-            <div className="absolute inset-0">
-              <svg className="absolute inset-0 w-full h-full" viewBox="0 0 600 800" preserveAspectRatio="xMidYMid slice">
-                <defs>
-                  <linearGradient id="containerWave1" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stopColor="#e0f2fe" stopOpacity="0.6"/>
-                    <stop offset="25%" stopColor="#b3e5fc" stopOpacity="0.4"/>
-                    <stop offset="50%" stopColor="#81d4fa" stopOpacity="0.3"/>
-                    <stop offset="75%" stopColor="#4fc3f7" stopOpacity="0.2"/>
-                    <stop offset="100%" stopColor="#29b6f6" stopOpacity="0.15"/>
-                  </linearGradient>
-                  <linearGradient id="containerWave2" x1="100%" y1="0%" x2="0%" y2="100%">
-                    <stop offset="0%" stopColor="#f3e5f5" stopOpacity="0.5"/>
-                    <stop offset="25%" stopColor="#e1bee7" stopOpacity="0.4"/>
-                    <stop offset="50%" stopColor="#ce93d8" stopOpacity="0.3"/>
-                    <stop offset="75%" stopColor="#ba68c8" stopOpacity="0.2"/>
-                    <stop offset="100%" stopColor="#ab47bc" stopOpacity="0.15"/>
-                  </linearGradient>
-                  <linearGradient id="containerWave3" x1="50%" y1="0%" x2="50%" y2="100%">
-                    <stop offset="0%" stopColor="#fff3e0" stopOpacity="0.4"/>
-                    <stop offset="25%" stopColor="#ffe0b2" stopOpacity="0.3"/>
-                    <stop offset="50%" stopColor="#ffcc80" stopOpacity="0.25"/>
-                    <stop offset="75%" stopColor="#ffb74d" stopOpacity="0.2"/>
-                    <stop offset="100%" stopColor="#ffa726" stopOpacity="0.15"/>
-                  </linearGradient>
-                </defs>
-                
-                {/* Main flowing wave patterns for container */}
-                <g stroke="url(#containerWave1)" strokeWidth="1.5" fill="none" opacity="0.8">
-                  <path d="M0,150 Q150,100 300,130 T600,120"/>
-                  <path d="M0,180 Q180,130 360,160 T600,150"/>
-                  <path d="M0,210 Q120,160 240,190 T480,180 Q540,175 600,185"/>
-                  <path d="M0,240 Q200,190 400,220 T600,210"/>
-                </g>
-                
-                <g stroke="url(#containerWave2)" strokeWidth="1.2" fill="none" opacity="0.7">
-                  <path d="M0,300 Q200,250 400,280 T600,270"/>
-                  <path d="M0,330 Q240,280 480,310 T600,300"/>
-                  <path d="M0,360 Q160,310 320,340 T600,330"/>
-                  <path d="M0,390 Q280,340 560,370 T600,360"/>
-                </g>
-                
-                <g stroke="url(#containerWave3)" strokeWidth="1.0" fill="none" opacity="0.6">
-                  <path d="M0,450 Q120,400 240,430 T480,420 Q540,415 600,425"/>
-                  <path d="M0,480 Q180,430 360,460 T600,450"/>
-                  <path d="M0,510 Q150,460 300,490 T600,480"/>
-                  <path d="M0,540 Q220,490 440,520 T600,510"/>
-                </g>
-                
-                {/* Filled wave areas for depth in container */}
-                <path d="M0,200 Q150,150 300,180 T600,170 L600,800 L0,800 Z" fill="url(#containerWave1)" opacity="0.1"/>
-                <path d="M0,350 Q200,300 400,330 T600,320 L600,800 L0,800 Z" fill="url(#containerWave2)" opacity="0.08"/>
-                <path d="M0,500 Q180,450 360,480 T600,470 L600,800 L0,800 Z" fill="url(#containerWave3)" opacity="0.06"/>
-                
-                {/* Additional flowing lines for complexity in container */}
-                <g stroke="url(#containerWave1)" strokeWidth="0.8" fill="none" opacity="0.5">
-                  <path d="M0,120 Q80,70 160,100 T320,90 Q400,85 480,95 T600,85"/>
-                  <path d="M0,600 Q100,550 200,580 T400,570 Q500,565 600,575"/>
-                  <path d="M0,650 Q120,600 240,630 T480,620 Q540,615 600,625"/>
-                  <path d="M0,700 Q160,650 320,680 T600,670"/>
-                </g>
-                
-                <g stroke="url(#containerWave2)" strokeWidth="0.6" fill="none" opacity="0.4">
-                  <path d="M0,100 Q60,50 120,80 T240,70 Q320,65 400,75 T560,65 Q580,63 600,68"/>
-                  <path d="M0,620 Q90,570 180,600 T360,590 Q450,585 540,595 T600,585"/>
-                  <path d="M0,670 Q110,620 220,650 T440,640 Q520,635 600,645"/>
-                  <path d="M0,720 Q140,670 280,700 T600,690"/>
-                </g>
-              </svg>
-            </div>
-          
-          <div className="max-w-lg mx-auto text-gray-900 relative z-10 space-y-6">
-            {/* Header Block */}
-            <div className="bg-gray-50 rounded-2xl p-8 border border-gray-200 shadow-lg relative overflow-hidden">
-              {/* Wavy lines background inside block */}
-              <div className="absolute inset-0">
-                <svg className="absolute inset-0 w-full h-full" viewBox="0 0 400 300" preserveAspectRatio="xMidYMid slice">
-                  <defs>
-                    <linearGradient id="blockWave1" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#e0f2fe" stopOpacity="0.3"/>
-                      <stop offset="50%" stopColor="#81d4fa" stopOpacity="0.2"/>
-                      <stop offset="100%" stopColor="#29b6f6" stopOpacity="0.1"/>
-                    </linearGradient>
-                    <linearGradient id="blockWave2" x1="100%" y1="0%" x2="0%" y2="100%">
-                      <stop offset="0%" stopColor="#f3e5f5" stopOpacity="0.3"/>
-                      <stop offset="50%" stopColor="#ce93d8" stopOpacity="0.2"/>
-                      <stop offset="100%" stopColor="#ab47bc" stopOpacity="0.1"/>
-                    </linearGradient>
-                  </defs>
-                  <g stroke="url(#blockWave1)" strokeWidth="1" fill="none" opacity="0.6">
-                    <path d="M0,80 Q100,60 200,75 T400,70"/>
-                    <path d="M0,100 Q120,80 240,95 T400,90"/>
-                  </g>
-                  <g stroke="url(#blockWave2)" strokeWidth="0.8" fill="none" opacity="0.5">
-                    <path d="M0,120 Q150,100 300,115 T400,110"/>
-                    <path d="M0,140 Q180,120 360,135 T400,130"/>
-                  </g>
-                  <path d="M0,110 Q100,90 200,105 T400,100 L400,300 L0,300 Z" fill="url(#blockWave1)" opacity="0.05"/>
-                </svg>
-              </div>
-              <div className="relative z-10 text-center">
-                <div className="mb-6 mt-4 flex justify-center">
-                  <SixthvaultLogo size="large" />
-                </div>
-                <h1 className="text-3xl font-bold mb-4 bg-gradient-to-r from-gray-900 via-blue-600 to-indigo-600 bg-clip-text text-transparent leading-tight">
-                  Welcome to SixthVault
-                </h1>
-                <p className="text-base text-blue-600 mb-3 font-medium">
-                  The Future of Document Intelligence
-                </p>
-                <p className="text-sm text-gray-600 leading-relaxed">
-                  Start your journey with enterprise-grade document intelligence solutions
-                </p>
-              </div>
-            </div>
-
-            {/* Features Line */}
-            <div className="text-center bg-gray-50 rounded-2xl p-6 border border-gray-200 shadow-lg relative overflow-hidden">
-              {/* Wavy lines background inside features section */}
-              <div className="absolute inset-0">
-                <svg className="absolute inset-0 w-full h-full" viewBox="0 0 400 120" preserveAspectRatio="xMidYMid slice">
-                  <defs>
-                    <linearGradient id="featuresWave1" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#f3e5f5" stopOpacity="0.4"/>
-                      <stop offset="50%" stopColor="#ce93d8" stopOpacity="0.2"/>
-                      <stop offset="100%" stopColor="#ab47bc" stopOpacity="0.1"/>
-                    </linearGradient>
-                    <linearGradient id="featuresWave2" x1="100%" y1="0%" x2="0%" y2="100%">
-                      <stop offset="0%" stopColor="#e0f2fe" stopOpacity="0.3"/>
-                      <stop offset="50%" stopColor="#81d4fa" stopOpacity="0.2"/>
-                      <stop offset="100%" stopColor="#29b6f6" stopOpacity="0.1"/>
-                    </linearGradient>
-                  </defs>
-                  <g stroke="url(#featuresWave1)" strokeWidth="1" fill="none" opacity="0.6">
-                    <path d="M0,40 Q100,30 200,35 T400,30"/>
-                    <path d="M0,50 Q120,40 240,45 T400,40"/>
-                  </g>
-                  <g stroke="url(#featuresWave2)" strokeWidth="0.8" fill="none" opacity="0.5">
-                    <path d="M0,60 Q150,50 300,55 T400,50"/>
-                    <path d="M0,70 Q180,60 360,65 T400,60"/>
-                  </g>
-                  <path d="M0,55 Q100,45 200,50 T400,45 L400,120 L0,120 Z" fill="url(#featuresWave1)" opacity="0.04"/>
-                </svg>
-              </div>
-              <div className="relative z-10">
-                <p className="text-lg text-gray-700 font-medium">
-                  AI-Powered Analysis • 99.9% Uptime Guarantee • Enterprise-Grade Security
-                </p>
-              </div>
-            </div>
-
-            {/* Quote Block */}
-            <div className="bg-gray-50 rounded-2xl p-8 border border-gray-200 shadow-lg relative overflow-hidden">
-              {/* Wavy lines background inside quote block */}
-              <div className="absolute inset-0">
-                <svg className="absolute inset-0 w-full h-full" viewBox="0 0 400 250" preserveAspectRatio="xMidYMid slice">
-                  <defs>
-                    <linearGradient id="quoteWave1" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#fff3e0" stopOpacity="0.4"/>
-                      <stop offset="50%" stopColor="#ffcc80" stopOpacity="0.2"/>
-                      <stop offset="100%" stopColor="#ffa726" stopOpacity="0.1"/>
-                    </linearGradient>
-                    <linearGradient id="quoteWave2" x1="100%" y1="0%" x2="0%" y2="100%">
-                      <stop offset="0%" stopColor="#e0f2fe" stopOpacity="0.3"/>
-                      <stop offset="50%" stopColor="#81d4fa" stopOpacity="0.2"/>
-                      <stop offset="100%" stopColor="#29b6f6" stopOpacity="0.1"/>
-                    </linearGradient>
-                  </defs>
-                  <g stroke="url(#quoteWave1)" strokeWidth="1" fill="none" opacity="0.6">
-                    <path d="M0,70 Q100,50 200,65 T400,60"/>
-                    <path d="M0,90 Q120,70 240,85 T400,80"/>
-                  </g>
-                  <g stroke="url(#quoteWave2)" strokeWidth="0.8" fill="none" opacity="0.5">
-                    <path d="M0,110 Q150,90 300,105 T400,100"/>
-                    <path d="M0,130 Q180,110 360,125 T400,120"/>
-                  </g>
-                  <path d="M0,100 Q100,80 200,95 T400,90 L400,250 L0,250 Z" fill="url(#quoteWave1)" opacity="0.04"/>
-                </svg>
-              </div>
-              <div className="relative z-10 text-center">
-                <div className="flex justify-center space-x-2 mb-6">
-                  <div className="w-3 h-3 bg-blue-400 rounded-full animate-pulse"></div>
-                  <div className="w-3 h-3 bg-gray-400 rounded-full animate-pulse" style={{animationDelay: '0.5s'}}></div>
-                  <div className="w-3 h-3 bg-indigo-400 rounded-full animate-pulse" style={{animationDelay: '1s'}}></div>
-                </div>
-                <blockquote className="text-gray-700 text-lg leading-relaxed italic font-medium mb-4">
-                  "Transform your document workflow with cutting-edge AI technology and unlock unprecedented insights from your data"
-                </blockquote>
-                <div className="text-gray-600 text-sm font-medium">
-                  — Enterprise Document Intelligence Platform
-                </div>
-              </div>
-            </div>
-          </div>
-          </div>
-        </div>
-
-        {/* Right Side - Registration Form */}
-        <div className="w-full lg:w-1/2 flex items-center justify-center p-4">
-          <div className="w-full max-w-md">
-            {/* Mobile Header */}
-            <div className="lg:hidden mb-6">
-              <div className="bg-white/90 backdrop-blur-md rounded-2xl p-6 border border-gray-200 shadow-xl">
+      <div className="relative z-10 flex min-h-screen">
+        {/* Registration Form */}
+        <div className="w-full flex items-start lg:items-center justify-center mobile-container py-4 sm:py-6 lg:py-8">
+          <div className="w-full max-w-md mx-auto">
+            {/* Mobile Header - Hidden in mobile view */}
+            <div className="hidden mobile-header">
+              <div className="bg-white/90 backdrop-blur-md rounded-xl sm:rounded-2xl p-4 sm:p-6 border border-gray-200 shadow-xl">
                 <div className="text-center">
-                  <div className="mb-4">
+                  <div className="mb-3 sm:mb-4">
                     <SixthvaultLogo size="medium" />
                   </div>
-                  <h1 className="text-2xl font-bold text-gray-900 mb-2">Welcome to SixthVault</h1>
-                  <p className="text-base text-blue-600 font-medium mb-1">The Future of Document Intelligence</p>
-                  <p className="text-sm text-gray-600 leading-relaxed">
+                  <h1 className="text-responsive-xl font-bold text-gray-900 mb-2">Welcome to SixthVault</h1>
+                  <p className="text-responsive-base text-blue-600 font-medium mb-1">The Future of Document Intelligence</p>
+                  <p className="text-responsive-sm text-gray-600 leading-relaxed">
                     Start your journey with enterprise-grade document intelligence solutions
                   </p>
                 </div>
               </div>
             </div>
 
-            <Card className="shadow-2xl border-0 bg-white/80 backdrop-blur-sm">
-              <CardHeader className="text-center pb-3">
+            <Card className="shadow-2xl border-0 bg-white/80 backdrop-blur-sm rounded-xl sm:rounded-2xl">
+              <CardHeader className="text-center pb-2 lg:pb-3 px-4 sm:px-6">
                 <Link
                   href="/"
-                  className="inline-flex items-center text-sm text-blue-600 hover:text-blue-500 transition-colors mb-2"
+                  className="touch-target inline-flex items-center text-responsive-sm text-blue-600 hover:text-blue-500 transition-colors mb-2"
                 >
                   <ArrowLeft className="w-4 h-4 mr-1" />
                   Back to Home
                 </Link>
-                <CardTitle className="text-xl font-bold bg-gradient-to-r from-slate-900 to-slate-700 bg-clip-text text-transparent">
+                <div className="flex justify-center mb-2 lg:mb-3">
+                  <SixthvaultLogo size="large" />
+                </div>
+                <CardTitle className="text-responsive-lg font-bold bg-gradient-to-r from-slate-900 to-slate-700 bg-clip-text text-transparent">
                   Create Your Account
                 </CardTitle>
-                <CardDescription className="text-sm text-slate-600">
+                <CardDescription className="text-responsive-sm text-slate-600">
                   Start your journey with enterprise-grade document intelligence
                 </CardDescription>
               </CardHeader>
               
-              <CardContent className="space-y-3">
-                <form onSubmit={handleSubmit} className="space-y-3">
+              <CardContent className="space-y-2 lg:space-y-3 px-4 sm:px-6 pb-4 sm:pb-6">
+                <form onSubmit={handleSubmit} className="space-y-2 lg:space-y-3">
                   {error && (
                     <Alert variant="destructive" className="border-red-200 bg-red-50">
                       <AlertDescription className="text-red-800">{error}</AlertDescription>
@@ -444,11 +247,11 @@ export default function RegisterPage() {
                   {/* Name Fields */}
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">
-                      <Label htmlFor="first_name" className="text-xs font-medium text-slate-700">
+                      <Label htmlFor="first_name" className="text-responsive-xs font-medium text-slate-700">
                         First Name
                       </Label>
                       <div className="relative">
-                        <User className="absolute left-2 top-2.5 h-3 w-3 text-slate-400" />
+                        <User className="absolute left-3 top-3 h-4 w-4 text-slate-400" />
                         <Input
                           id="first_name"
                           name="first_name"
@@ -458,16 +261,17 @@ export default function RegisterPage() {
                           onChange={handleChange}
                           required
                           disabled={isLoading}
-                          className="pl-8 h-8 text-sm border-slate-200 focus:border-blue-500 focus:ring-blue-500/20"
+                          className="pl-10 h-9 lg:h-10 text-responsive-sm border-slate-200 focus:border-blue-500 focus:ring-blue-500/20 rounded-lg"
+                          autoComplete="given-name"
                         />
                       </div>
                     </div>
                     <div className="space-y-1">
-                      <Label htmlFor="last_name" className="text-xs font-medium text-slate-700">
+                      <Label htmlFor="last_name" className="text-responsive-xs font-medium text-slate-700">
                         Last Name
                       </Label>
                       <div className="relative">
-                        <User className="absolute left-2 top-2.5 h-3 w-3 text-slate-400" />
+                        <User className="absolute left-3 top-3 h-4 w-4 text-slate-400" />
                         <Input
                           id="last_name"
                           name="last_name"
@@ -477,7 +281,8 @@ export default function RegisterPage() {
                           onChange={handleChange}
                           required
                           disabled={isLoading}
-                          className="pl-8 h-8 text-sm border-slate-200 focus:border-blue-500 focus:ring-blue-500/20"
+                          className="pl-10 h-9 lg:h-10 text-responsive-sm border-slate-200 focus:border-blue-500 focus:ring-blue-500/20 rounded-lg"
+                          autoComplete="family-name"
                         />
                       </div>
                     </div>
@@ -485,11 +290,11 @@ export default function RegisterPage() {
 
                   {/* Email Field */}
                   <div className="space-y-1">
-                    <Label htmlFor="email" className="text-xs font-medium text-slate-700">
+                    <Label htmlFor="email" className="text-responsive-xs font-medium text-slate-700">
                       Business Email
                     </Label>
                     <div className="relative">
-                      <Mail className="absolute left-2 top-2.5 h-3 w-3 text-slate-400" />
+                      <Mail className="absolute left-3 top-3 h-4 w-4 text-slate-400" />
                       <Input
                         id="email"
                         name="email"
@@ -499,18 +304,20 @@ export default function RegisterPage() {
                         onChange={handleChange}
                         required
                         disabled={isLoading}
-                        className="pl-8 h-8 text-sm border-slate-200 focus:border-blue-500 focus:ring-blue-500/20"
+                          className="pl-10 h-9 lg:h-10 text-responsive-sm border-slate-200 focus:border-blue-500 focus:ring-blue-500/20 rounded-lg"
+                        autoComplete="email"
+                        inputMode="email"
                       />
                     </div>
                   </div>
 
                   {/* Company Field */}
                   <div className="space-y-1">
-                    <Label htmlFor="company" className="text-xs font-medium text-slate-700">
+                    <Label htmlFor="company" className="text-responsive-xs font-medium text-slate-700">
                       Company <span className="text-slate-400">(Optional)</span>
                     </Label>
                     <div className="relative">
-                      <Building2 className="absolute left-2 top-2.5 h-3 w-3 text-slate-400" />
+                      <Building2 className="absolute left-3 top-3 h-4 w-4 text-slate-400" />
                       <Input
                         id="company"
                         name="company"
@@ -519,18 +326,19 @@ export default function RegisterPage() {
                         value={formData.company}
                         onChange={handleChange}
                         disabled={isLoading}
-                        className="pl-8 h-8 text-sm border-slate-200 focus:border-blue-500 focus:ring-blue-500/20"
+                        className="pl-10 h-9 lg:h-10 text-responsive-sm border-slate-200 focus:border-blue-500 focus:ring-blue-500/20 rounded-lg"
+                        autoComplete="organization"
                       />
                     </div>
                   </div>
 
                   {/* Password Field */}
                   <div className="space-y-1">
-                    <Label htmlFor="password" className="text-xs font-medium text-slate-700">
+                    <Label htmlFor="password" className="text-responsive-xs font-medium text-slate-700">
                       Password
                     </Label>
                     <div className="relative">
-                      <Lock className="absolute left-2 top-2.5 h-3 w-3 text-slate-400" />
+                      <Lock className="absolute left-3 top-3 h-4 w-4 text-slate-400" />
                       <Input
                         id="password"
                         name="password"
@@ -540,20 +348,21 @@ export default function RegisterPage() {
                         onChange={handleChange}
                         required
                         disabled={isLoading}
-                        className="pl-8 pr-8 h-8 text-sm border-slate-200 focus:border-blue-500 focus:ring-blue-500/20"
+                        className="pl-10 pr-12 h-9 lg:h-10 text-responsive-sm border-slate-200 focus:border-blue-500 focus:ring-blue-500/20 rounded-lg"
+                        autoComplete="new-password"
                       />
                       <Button
                         type="button"
                         variant="ghost"
                         size="sm"
-                        className="absolute right-0 top-0 h-8 px-2 hover:bg-transparent"
+                        className="touch-target absolute right-0 top-0 h-9 lg:h-10 px-3 hover:bg-transparent"
                         onClick={() => setShowPassword(!showPassword)}
                         disabled={isLoading}
                       >
                         {showPassword ? (
-                          <EyeOff className="h-3 w-3 text-slate-400" />
+                          <EyeOff className="h-4 w-4 text-slate-400" />
                         ) : (
-                          <Eye className="h-3 w-3 text-slate-400" />
+                          <Eye className="h-4 w-4 text-slate-400" />
                         )}
                       </Button>
                     </div>
@@ -561,15 +370,15 @@ export default function RegisterPage() {
                     {/* Password Strength Indicator */}
                     {formData.password && (
                       <div className="space-y-1">
-                        <div className="flex justify-between text-xs">
+                        <div className="flex justify-between text-responsive-xs">
                           <span className="text-slate-500">Strength</span>
                           <span className={`font-medium ${passwordStrength <= 2 ? 'text-red-500' : passwordStrength <= 3 ? 'text-yellow-500' : 'text-green-500'}`}>
                             {getPasswordStrengthText()}
                           </span>
                         </div>
-                        <div className="w-full bg-slate-200 rounded-full h-1">
+                        <div className="w-full bg-slate-200 rounded-full h-2">
                           <div 
-                            className={`h-1 rounded-full transition-all duration-300 ${getPasswordStrengthColor()}`}
+                            className={`h-2 rounded-full transition-all duration-300 ${getPasswordStrengthColor()}`}
                             style={{ width: `${(passwordStrength / 5) * 100}%` }}
                           ></div>
                         </div>
@@ -579,11 +388,11 @@ export default function RegisterPage() {
 
                   {/* Confirm Password Field */}
                   <div className="space-y-1">
-                    <Label htmlFor="confirmPassword" className="text-xs font-medium text-slate-700">
+                    <Label htmlFor="confirmPassword" className="text-responsive-xs font-medium text-slate-700">
                       Confirm Password
                     </Label>
                     <div className="relative">
-                      <Lock className="absolute left-2 top-2.5 h-3 w-3 text-slate-400" />
+                      <Lock className="absolute left-3 top-3 h-4 w-4 text-slate-400" />
                       <Input
                         id="confirmPassword"
                         name="confirmPassword"
@@ -593,20 +402,21 @@ export default function RegisterPage() {
                         onChange={handleChange}
                         required
                         disabled={isLoading}
-                        className="pl-8 pr-8 h-8 text-sm border-slate-200 focus:border-blue-500 focus:ring-blue-500/20"
+                        className="pl-10 pr-12 h-9 lg:h-10 text-responsive-sm border-slate-200 focus:border-blue-500 focus:ring-blue-500/20 rounded-lg"
+                        autoComplete="new-password"
                       />
                       <Button
                         type="button"
                         variant="ghost"
                         size="sm"
-                        className="absolute right-0 top-0 h-8 px-2 hover:bg-transparent"
+                        className="touch-target absolute right-0 top-0 h-9 lg:h-10 px-3 hover:bg-transparent"
                         onClick={() => setShowConfirmPassword(!showConfirmPassword)}
                         disabled={isLoading}
                       >
                         {showConfirmPassword ? (
-                          <EyeOff className="h-3 w-3 text-slate-400" />
+                          <EyeOff className="h-4 w-4 text-slate-400" />
                         ) : (
-                          <Eye className="h-3 w-3 text-slate-400" />
+                          <Eye className="h-4 w-4 text-slate-400" />
                         )}
                       </Button>
                     </div>
@@ -615,12 +425,12 @@ export default function RegisterPage() {
                   {/* Submit Button */}
                   <Button 
                     type="submit" 
-                    className="w-full h-10 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-medium shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-[1.02]"
+                    className="touch-target w-full h-10 lg:h-12 bg-gray-100 hover:bg-gray-200 text-gray-800 font-semibold shadow-sm border border-gray-300 transition-all duration-200 text-responsive-base rounded-lg"
                     disabled={isLoading}
                   >
                     {isLoading ? (
                       <>
-                        <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                        <Loader2 className="mr-2 h-5 w-5 animate-spin" />
                         Creating account...
                       </>
                     ) : (
@@ -688,6 +498,37 @@ export default function RegisterPage() {
         }
         .bg-grid-white\/\[0\.05\] {
           background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' width='32' height='32' fill='none' stroke='rgb(255 255 255 / 0.05)'%3e%3cpath d='m0 .5h32m-32 32v-32'/%3e%3c/svg%3e");
+        }
+        
+        /* Enhanced mobile responsiveness */
+        @media (max-height: 800px) {
+          .mobile-container {
+            padding-top: 1rem !important;
+            padding-bottom: 1rem !important;
+          }
+        }
+        
+        @media (max-height: 700px) {
+          .mobile-container {
+            padding-top: 0.5rem !important;
+            padding-bottom: 0.5rem !important;
+          }
+        }
+        
+        /* Ensure form is scrollable on very small screens */
+        @media (max-height: 600px) {
+          .mobile-container {
+            align-items: flex-start !important;
+            padding-top: 0.25rem !important;
+            padding-bottom: 0.25rem !important;
+          }
+        }
+        
+        /* Hide mobile header on very small screens to save space */
+        @media (max-height: 600px) {
+          .mobile-header {
+            display: none !important;
+          }
         }
       `}</style>
     </div>

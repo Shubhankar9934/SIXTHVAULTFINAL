@@ -4,9 +4,17 @@ const RAG_API_URL = process.env.NEXT_PUBLIC_RAG_API_URL || 'http://localhost:800
 
 export async function POST(request: NextRequest) {
   try {
-    const { token } = await request.json()
+    const body = await request.json()
+    console.log('Validate reset token - request body:', JSON.stringify(body, null, 2))
+    
+    const { token } = body
+
+    console.log('Validate reset token - extracted token:', token)
+    console.log('Validate reset token - token type:', typeof token)
+    console.log('Validate reset token - token length:', token ? token.length : 'N/A')
 
     if (!token) {
+      console.log('Validate reset token - no token provided')
       return NextResponse.json(
         { message: 'Token is required' },
         { status: 400 }

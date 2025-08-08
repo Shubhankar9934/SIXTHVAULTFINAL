@@ -350,10 +350,19 @@ async def ultra_fast_tagging(batch: str, path: str, text: str, llm: Any, provide
     else:
         text_sample = text
     
-    tags = await lightning_llm_request(
-        provider, tagging.make_tags, text_sample, llm, 
-        timeout=settings.tagging_timeout
-    )
+    try:
+        tags = await lightning_llm_request(
+            provider, tagging.make_tags, text_sample, llm, 
+            timeout=settings.tagging_timeout
+        )
+        
+        # Ensure tags is a list
+        if not isinstance(tags, list):
+            tags = ["content", "document"]
+            
+    except Exception as e:
+        print(f"Tagging failed: {e}")
+        tags = ["content", "document"]
     
     await safe_push(batch, "processing", {
         "file": path, "stage": "tagging_complete", "progress": 30,
@@ -371,10 +380,19 @@ async def ultra_fast_demographics(batch: str, path: str, text: str, llm: Any, pr
     # Smart sampling for demographics (usually in first part of document)
     text_sample = text[:15000] if len(text) > 15000 else text
     
-    demos = await lightning_llm_request(
-        provider, tagging.make_demo_tags, text_sample, llm,
-        timeout=settings.demographics_timeout
-    )
+    try:
+        demos = await lightning_llm_request(
+            provider, tagging.make_demo_tags, text_sample, llm,
+            timeout=settings.demographics_timeout
+        )
+        
+        # Ensure demos is a list
+        if not isinstance(demos, list):
+            demos = []
+            
+    except Exception as e:
+        print(f"Demographics extraction failed: {e}")
+        demos = []
     
     await safe_push(batch, "processing", {
         "file": path, "stage": "demographics_complete", "progress": 40,
@@ -769,20 +787,96 @@ async def lightning_process_file(owner_id: str, batch: str, path: str, provider:
             parallel_chunking()
         ]
         
-        # CRITICAL: Execute with proper timeout handling
-        if settings.ai_task_timeout == 0:
-            print(f"🚀 UNLIMITED PARALLEL PROCESSING: No timeout constraints for {path}")
-            results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
-        else:
-            ai_timeout = settings.ai_task_timeout * 4  # More time for parallel processing
-            print(f"⏱️ TIMED PARALLEL PROCESSING: {ai_timeout}s timeout for {path}")
-            results = await asyncio.wait_for(
-                asyncio.gather(*parallel_tasks, return_exceptions=True),
-                timeout=ai_timeout
-            )
+        # CRITICAL: Execute with proper timeout handling and comprehensive error catching
+        try:
+            if settings.ai_task_timeout == 0:
+                print(f"🚀 UNLIMITED PARALLEL PROCESSING: No timeout constraints for {path}")
+                results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+            else:
+                ai_timeout = settings.ai_task_timeout * 4  # More time for parallel processing
+                print(f"⏱️ TIMED PARALLEL PROCESSING: {ai_timeout}s timeout for {path}")
+                results = await asyncio.wait_for(
+                    asyncio.gather(*parallel_tasks, return_exceptions=True),
+                    timeout=ai_timeout
+                )
+        except Exception as parallel_error:
+            print(f"❌ Parallel processing failed for {path} after {time.time() - start_time:.2f}s: {parallel_error}")
+            # Set fallback results for all tasks
+            results = [
+                ["content", "document"],  # tags
+                [],  # demographics
+                "Summary generation failed - please try again.",  # summary
+                "Insights generation failed - please try again.",  # insights
+                ([{"path": path, "text": text[:1000], "level": "fallback", "chunk_id": 0}], [text[:1000]])  # chunking
+            ]
         
-        # Extract results
-        tags, demos, summary, insight, (hierarchical_chunks, chunk_texts) = results
+        # Extract results with comprehensive error handling
+        try:
+            # Initialize all variables with safe defaults first
+            tags = ["content", "document"]
+            demos = []
+            summary = "Summary generation failed - please try again."
+            insight = "Insights generation failed - please try again."
+            hierarchical_chunks = [{"path": path, "text": text[:1000], "level": "fallback", "chunk_id": 0}]
+            chunk_texts = [text[:1000]]
+            
+            # Safely extract results with detailed error checking
+            if len(results) > 0:
+                if isinstance(results[0], Exception):
+                    print(f"Tagging task failed: {results[0]}")
+                elif isinstance(results[0], list):
+                    tags = results[0]
+                else:
+                    print(f"Unexpected tagging result type: {type(results[0])}")
+            
+            if len(results) > 1:
+                if isinstance(results[1], Exception):
+                    print(f"Demographics task failed: {results[1]}")
+                elif isinstance(results[1], list):
+                    demos = results[1]
+                else:
+                    print(f"Unexpected demographics result type: {type(results[1])}")
+            
+            if len(results) > 2:
+                if isinstance(results[2], Exception):
+                    print(f"Summary task failed: {results[2]}")
+                elif isinstance(results[2], str):
+                    summary = results[2]
+                else:
+                    print(f"Unexpected summary result type: {type(results[2])}")
+            
+            if len(results) > 3:
+                if isinstance(results[3], Exception):
+                    print(f"Insights task failed: {results[3]}")
+                elif isinstance(results[3], str):
+                    insight = results[3]
+                else:
+                    print(f"Unexpected insights result type: {type(results[3])}")
+            
+            # Handle chunking result with extra safety
+            if len(results) > 4:
+                if isinstance(results[4], Exception):
+                    print(f"Chunking task failed: {results[4]}")
+                elif isinstance(results[4], tuple) and len(results[4]) == 2:
+                    try:
+                        hierarchical_chunks, chunk_texts = results[4]
+                        # Validate the unpacked results
+                        if not isinstance(hierarchical_chunks, list) or not isinstance(chunk_texts, list):
+                            print(f"Invalid chunking result types: {type(hierarchical_chunks)}, {type(chunk_texts)}")
+                            # Reset to fallback values
+                            hierarchical_chunks = [{"path": path, "text": text[:1000], "level": "fallback", "chunk_id": 0}]
+                            chunk_texts = [text[:1000]]
+                    except Exception as chunk_unpack_error:
+                        print(f"Error unpacking chunking result: {chunk_unpack_error}")
+                        # Keep fallback values already set
+                else:
+                    print(f"Unexpected chunking result type or structure: {type(results[4])}")
+                    # Keep fallback values already set
+                
+        except Exception as unpack_error:
+            print(f"Critical error in result extraction: {unpack_error}")
+            # All variables already have safe fallback values
+            pass
         
         # Handle individual task failures gracefully
         if isinstance(tags, Exception):

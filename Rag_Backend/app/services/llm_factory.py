@@ -33,7 +33,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 import httpx
-from ollama import AsyncClient as OllamaAsyncClient, Client as OllamaClient
 from app.config import settings
 
 # Import Bedrock client
@@ -78,7 +77,6 @@ class ProviderState(Enum):
 
 class ProviderType(Enum):
     BEDROCK = "bedrock"
-    OLLAMA = "ollama"
     GROQ = "groq"
     OPENAI = "openai"
     DEEPSEEK = "deepseek"
@@ -113,79 +111,60 @@ class NeverFailLLMConfig:
             enabled=settings.bedrock_enabled,  # Controlled by config
             models=["anthropic.claude-3-haiku-20240307-v1:0"]
         ),
-        "ollama": ProviderConfig(
-            name="ollama",
-            type=ProviderType.OLLAMA,
-            priority=1,  # Fallback to local Ollama
-            max_failures=1,  # Reduced failures for faster recovery
-            recovery_time=10,  # Faster recovery
-            timeout=None,  # ABSOLUTELY NO TIMEOUT for Ollama
-            max_tokens=2048,  # Increased for large responses
-            temperature=0.1,
-            enabled=settings.ollama_enabled,  # Controlled by configuration
-            models=["llama3.2:3b", "llama3.2:latest", "phi3:mini", "phi3:3.8b"]
-        ),
         "groq": ProviderConfig(
             name="groq",
             type=ProviderType.GROQ,
-            priority=2,
+            priority=1,  # Second priority after Bedrock
             max_failures=1,  # Faster recovery
             recovery_time=5,  # Quick recovery
             timeout=None,  # NO TIMEOUT - Wait indefinitely
             max_tokens=4096,  # Increased for better responses
             temperature=0.1,
+            enabled=settings.groq_enabled,  # Controlled by configuration
             models=["llama3-8b-8192", "mixtral-8x7b-32768"]
         ),
         "openai": ProviderConfig(
             name="openai",
             type=ProviderType.OPENAI,
-            priority=3,
+            priority=2,  # Third priority
             max_failures=1,  # Faster recovery
             recovery_time=5,  # Quick recovery
             timeout=None,  # NO TIMEOUT - Wait indefinitely
             max_tokens=4096,  # Increased for better responses
             temperature=0.1,
+            enabled=settings.openai_enabled,  # Controlled by configuration
             models=["gpt-3.5-turbo", "gpt-4o-mini"]
         ),
         "deepseek": ProviderConfig(
             name="deepseek",
             type=ProviderType.DEEPSEEK,
-            priority=4,
+            priority=3,  # Fourth priority
             max_failures=1,  # Faster recovery
             recovery_time=5,  # Quick recovery
             timeout=None,  # NO TIMEOUT - Wait indefinitely
             max_tokens=4096,  # Increased for better responses
             temperature=0.1,
+            enabled=settings.deepseek_enabled,  # Controlled by configuration
             models=["deepseek-chat"]
         ),
         "gemini": ProviderConfig(
             name="gemini",
             type=ProviderType.GEMINI,
-            priority=5,
+            priority=4,  # Fifth priority
             max_failures=1,  # Faster recovery
             recovery_time=5,  # Quick recovery
             timeout=None,  # NO TIMEOUT - Wait indefinitely
             max_tokens=4096,  # Increased for better responses
             temperature=0.1,
+            enabled=settings.gemini_enabled,  # Controlled by configuration
             models=["gemini-1.5-flash", "gemini-1.5-pro"]
         )
     })
-    
-    # Ollama specific settings - ULTRA-FAST CONFIGURATION
-    ollama_host: str = settings.ollama_host
-    ollama_connect_timeout: int = 10  # Quick connection
-    ollama_read_timeout: Optional[int] = None  # ABSOLUTELY NO READ TIMEOUT
     
     # Performance optimization - MAXIMUM PARALLEL PROCESSING
     max_concurrent_requests: int = 16  # DOUBLED for true parallel processing
     connection_pool_size: int = 64  # DOUBLED pool size for 4 parallel AI tasks
     keep_alive_timeout: int = 3600  # Extended keep-alive for long processing
-    
-    # Generation parameters - OPTIMIZED FOR SPEED
-    num_ctx: int = 8192  # OPTIMIZED context window (8K for speed)
-    num_predict: int = 512  # OPTIMIZED response capability for speed
-    top_p: float = 0.9
-    repeat_penalty: float = 1.1
     
     # Ultra-fast processing settings
     chunk_size: int = 4000  # Optimal chunk size for large texts
@@ -334,273 +313,6 @@ health_monitor = ProviderHealthMonitor()
 # Multi-Provider LLM Clients
 # ═══════════════════════════════════════════════════════════════════════════
 
-class NeverFailOllamaClient:
-    def __init__(self):
-        self.client = None
-        self.async_client = None
-        self.connection_pool = None
-        self.model_cache = set()
-        self.last_health_check = None
-        self.health_status = "unknown"
-        self.request_semaphore = asyncio.Semaphore(config.max_concurrent_requests)
-        
-    async def initialize(self):
-        """Initialize with ULTRA-FAST optimized connection pooling"""
-        try:
-            # Create ULTRA-OPTIMIZED HTTP client with maximum connection pooling
-            self.connection_pool = httpx.AsyncClient(
-                timeout=httpx.Timeout(
-                    connect=config.ollama_connect_timeout,
-                    read=None,  # NO READ TIMEOUT
-                    write=30.0,
-                    pool=10.0
-                ),
-                limits=httpx.Limits(
-                    max_connections=config.connection_pool_size,
-                    max_keepalive_connections=config.connection_pool_size,  # Use all connections
-                    keepalive_expiry=config.keep_alive_timeout
-                ),
-                headers={
-                    "Connection": "keep-alive",
-                    "Keep-Alive": "timeout=600, max=1000"
-                }
-            )
-            
-            # Initialize Ollama clients with NO TIMEOUT
-            self.async_client = OllamaAsyncClient(
-                host=config.ollama_host,
-                timeout=None  # ABSOLUTELY NO TIMEOUT
-            )
-            
-            self.client = OllamaClient(
-                host=config.ollama_host,
-                timeout=None  # ABSOLUTELY NO TIMEOUT
-            )
-            
-            # Pre-load and warm up ALL models in parallel
-            warm_up_tasks = []
-            for model in config.providers["ollama"].models:
-                task = self._warm_up_model(model)
-                warm_up_tasks.append(task)
-            
-            # Wait for all models to warm up
-            await asyncio.gather(*warm_up_tasks, return_exceptions=True)
-            
-            print(f"⚡ ULTRA-FAST Ollama client initialized with {config.max_concurrent_requests} concurrent slots")
-            print(f"🔥 Pre-loaded {len(self.model_cache)} models for instant access")
-            
-        except Exception as e:
-            print(f"❌ Failed to initialize Ollama client: {e}")
-            # Don't raise - allow fallback to work
-    
-    async def _warm_up_model(self, model: str):
-        """ULTRA-FAST model warm-up with NO TIMEOUT"""
-        try:
-            if model not in self.model_cache:
-                print(f"🔥 Warming up model: {model}")
-                
-                # Ultra-fast warm-up request with NO TIMEOUT
-                response = await self.async_client.generate(
-                    model=model,
-                    prompt="Hi",
-                    options={
-                        "num_predict": 1,
-                        "num_ctx": config.num_ctx,
-                        "temperature": 0.1
-                    }
-                )
-                
-                self.model_cache.add(model)
-                print(f"✅ Model {model} warmed up successfully")
-                
-        except Exception as e:
-            print(f"⚠️ Model warm-up failed for {model}: {e}")
-            # Don't fail the entire initialization
-    
-    async def health_check(self) -> bool:
-        """Quick health check with caching"""
-        now = datetime.now()
-        
-        # Use cached health status if recent
-        if (self.last_health_check and 
-            (now - self.last_health_check).seconds < config.health_check_interval):
-            return self.health_status == "healthy"
-        
-        try:
-            # Quick health check
-            response = await asyncio.wait_for(
-                self.async_client.list(),
-                timeout=5
-            )
-            
-            self.health_status = "healthy"
-            self.last_health_check = now
-            return True
-            
-        except Exception as e:
-            print(f"❌ Ollama health check failed: {e}")
-            self.health_status = "unhealthy"
-            self.last_health_check = now
-            return False
-    
-    async def generate(
-        self,
-        model: str,
-        prompt: str,
-        system: str = None,
-        max_tokens: int = None,
-        temperature: float = None,
-        stream: bool = False
-    ) -> Union[str, AsyncGenerator[str, None]]:
-        """ULTRA-FAST generation with Ollama - ZERO TIMEOUT, MAXIMUM SPEED"""
-        
-        async with self.request_semaphore:
-            try:
-                # ULTRA-OPTIMIZED generation options
-                options = {
-                    "num_ctx": config.num_ctx,
-                    "num_predict": max_tokens or config.num_predict,
-                    "temperature": temperature or 0.1,
-                    "top_p": config.top_p,
-                    "repeat_penalty": config.repeat_penalty,
-                    "num_thread": settings.ollama_num_thread,
-                    "num_gpu": settings.ollama_num_gpu,
-                    "num_batch": settings.ollama_batch_size,
-                }
-                
-                # Model should already be warmed up at startup
-                # No warm-up during inference for maximum speed
-                if model not in self.model_cache:
-                    print(f"⚠️ Model {model} not in cache - should have been pre-loaded at startup")
-                
-                start_time = time.time()
-                
-                # Handle large prompts with intelligent chunking
-                if len(prompt) > 50000:  # Large prompt
-                    return await self._handle_large_prompt(model, prompt, system, options, stream)
-                
-                if stream:
-                    return self._generate_stream(model, prompt, system, options)
-                else:
-                    # ULTRA-FAST non-streaming generation
-                    messages = []
-                    if system:
-                        messages.append({"role": "system", "content": system})
-                    messages.append({"role": "user", "content": prompt})
-                    
-                    # ZERO TIMEOUT - Wait indefinitely for completion
-                    response = await self.async_client.chat(
-                        model=model,
-                        messages=messages,
-                        options=options
-                    )
-                    
-                    generation_time = time.time() - start_time
-                    chars_per_sec = len(response['message']['content']) / generation_time if generation_time > 0 else 0
-                    print(f"⚡ ULTRA-FAST Ollama: {generation_time:.2f}s ({chars_per_sec:.1f} chars/sec)")
-                    
-                    return response['message']['content']
-                    
-            except Exception as e:
-                raise Exception(f"Ollama generation failed: {str(e)}")
-    
-    async def _handle_large_prompt(
-        self,
-        model: str,
-        prompt: str,
-        system: str,
-        options: Dict[str, Any],
-        stream: bool = False
-    ) -> str:
-        """Handle very large prompts with intelligent chunking and parallel processing"""
-        print(f"📄 Processing large prompt ({len(prompt)} chars) with parallel chunking...")
-        
-        if not config.parallel_chunk_processing:
-            # Fallback to single large request
-            messages = []
-            if system:
-                messages.append({"role": "system", "content": system})
-            messages.append({"role": "user", "content": prompt})
-            
-            response = await self.async_client.chat(
-                model=model,
-                messages=messages,
-                options=options
-            )
-            return response['message']['content']
-        
-        # Split into chunks for parallel processing
-        chunk_size = config.chunk_size
-        chunks = [prompt[i:i+chunk_size] for i in range(0, len(prompt), chunk_size)]
-        
-        if len(chunks) > config.max_chunks:
-            # If too many chunks, use larger chunk size
-            chunk_size = len(prompt) // config.max_chunks
-            chunks = [prompt[i:i+chunk_size] for i in range(0, len(prompt), chunk_size)]
-        
-        print(f"🔄 Processing {len(chunks)} chunks in parallel...")
-        
-        # Process chunks in parallel
-        async def process_chunk(chunk_text: str, chunk_id: int) -> str:
-            try:
-                messages = []
-                if system:
-                    messages.append({"role": "system", "content": system})
-                messages.append({"role": "user", "content": f"Process this part (chunk {chunk_id+1}): {chunk_text}"})
-                
-                response = await self.async_client.chat(
-                    model=model,
-                    messages=messages,
-                    options={**options, "num_predict": 500}  # Smaller responses for chunks
-                )
-                return response['message']['content']
-            except Exception as e:
-                return f"Error processing chunk {chunk_id+1}: {str(e)}"
-        
-        # Process all chunks concurrently
-        chunk_tasks = [process_chunk(chunk, i) for i, chunk in enumerate(chunks)]
-        chunk_results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
-        
-        # Combine results
-        combined_result = "\n\n".join([
-            result for result in chunk_results 
-            if isinstance(result, str) and not result.startswith("Error")
-        ])
-        
-        print(f"✅ Large prompt processed: {len(chunks)} chunks -> {len(combined_result)} chars")
-        return combined_result
-    
-    async def _generate_stream(
-        self,
-        model: str,
-        prompt: str,
-        system: str,
-        options: Dict[str, Any]
-    ) -> AsyncGenerator[str, None]:
-        """Streaming generation for real-time responses"""
-        try:
-            messages = []
-            if system:
-                messages.append({"role": "system", "content": system})
-            messages.append({"role": "user", "content": prompt})
-            
-            async for chunk in await self.async_client.chat(
-                model=model,
-                messages=messages,
-                options=options,
-                stream=True
-            ):
-                if chunk['message']['content']:
-                    yield chunk['message']['content']
-                    
-        except Exception as e:
-            raise Exception(f"Ollama streaming failed: {str(e)}")
-    
-    async def close(self):
-        """Clean up resources"""
-        if self.connection_pool:
-            await self.connection_pool.aclose()
-        print("⚡ Never-Fail Ollama client closed")
 
 class NeverFailGroqClient:
     def __init__(self):
@@ -913,22 +625,46 @@ class NeverFailGeminiClient:
             if stream:
                 # Handle streaming response
                 async def stream_generator():
-                    response = model_instance.generate_content(
-                        full_prompt,
-                        generation_config=generation_config,
-                        stream=True
-                    )
-                    for chunk in response:
+                    # Run the sync Gemini call in a thread pool
+                    import asyncio
+                    import concurrent.futures
+                    
+                    def generate_sync():
+                        response = model_instance.generate_content(
+                            full_prompt,
+                            generation_config=generation_config,
+                            stream=True
+                        )
+                        return list(response)
+                    
+                    # Execute in thread pool to avoid blocking
+                    loop = asyncio.get_event_loop()
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        chunks = await loop.run_in_executor(executor, generate_sync)
+                    
+                    for chunk in chunks:
                         if chunk.text:
                             yield chunk.text
+                            
                 return stream_generator()
             else:
-                # Non-streaming response
-                response = model_instance.generate_content(
-                    full_prompt,
-                    generation_config=generation_config
-                )
-                return response.text
+                # Non-streaming response - run in thread pool to avoid blocking
+                import asyncio
+                import concurrent.futures
+                
+                def generate_sync():
+                    response = model_instance.generate_content(
+                        full_prompt,
+                        generation_config=generation_config
+                    )
+                    return response.text
+                
+                # Execute in thread pool to avoid blocking the event loop
+                loop = asyncio.get_event_loop()
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    result = await loop.run_in_executor(executor, generate_sync)
+                
+                return result
                 
         except Exception as e:
             raise Exception(f"Gemini generation failed: {str(e)}")
@@ -1067,7 +803,6 @@ class NeverFailBedrockClient:
 
 # Global client instances
 _bedrock_client = NeverFailBedrockClient()
-_ollama_client = NeverFailOllamaClient()
 _groq_client = NeverFailGroqClient()
 _openai_client = NeverFailOpenAIClient()
 _gemini_client = NeverFailGeminiClient()
@@ -1080,10 +815,9 @@ _deepseek_client = NeverFailDeepSeekClient()
 def get_provider_for_model(model: str) -> str:
     """
     Smart model-to-provider mapping to route requests to correct providers
-    This fixes the core issue where external API models were being sent to Ollama
     """
     if not model:
-        return "ollama"  # Default fallback
+        return "bedrock"  # Default fallback to bedrock
     
     model_lower = model.lower()
     
@@ -1104,15 +838,11 @@ def get_provider_for_model(model: str) -> str:
         return "openai"
     
     # Groq models (specific patterns)
-    if any(pattern in model_lower for pattern in ["-8192", "mixtral", "gemma"]):
+    if any(pattern in model_lower for pattern in ["-8192", "mixtral", "gemma", "llama"]):
         return "groq"
     
-    # Ollama models (local models)
-    if any(pattern in model_lower for pattern in ["llama3.2", "phi3", "qwen", "mistral", "codellama"]):
-        return "ollama"
-    
-    # Default fallback to ollama for unknown models
-    return "ollama"
+    # Default fallback to bedrock for unknown models
+    return "bedrock"
 
 def validate_model_provider_combination(model: str, provider: str) -> bool:
     """
@@ -1138,21 +868,21 @@ def get_fallback_model_for_provider(provider: str) -> str:
     
     # Provider-specific fallbacks
     fallback_models = {
-        "ollama": "llama3.2:3b",
+        "bedrock": "anthropic.claude-3-haiku-20240307-v1:0",
         "groq": "llama3-8b-8192", 
         "openai": "gpt-3.5-turbo",
         "gemini": "gemini-1.5-flash",
         "deepseek": "deepseek-chat"
     }
     
-    return fallback_models.get(provider, "llama3.2:3b")
+    return fallback_models.get(provider, "anthropic.claude-3-haiku-20240307-v1:0")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Never-Fail LLM Interface
 # ═══════════════════════════════════════════════════════════════════════════
 
 class NeverFailLLM:
-    def __init__(self, preferred_provider: str = "ollama", model: str = None):
+    def __init__(self, preferred_provider: str = "bedrock", model: str = None):
         self.preferred_provider = preferred_provider
         self.model = model
         self.stats = {
@@ -1210,7 +940,7 @@ class NeverFailLLM:
         
         if not available_providers:
             # Emergency fallback - try all providers regardless of circuit breaker state
-            available_providers = ["ollama", "groq", "openai", "gemini", "deepseek"]
+            available_providers = ["bedrock", "groq", "openai", "gemini", "deepseek"]
             print("🚨 EMERGENCY MODE: All circuit breakers open, trying all providers")
         
         last_error = None
@@ -1312,12 +1042,6 @@ class NeverFailLLM:
                 model, prompt, system, max_tokens, temperature, stream
             )
         
-        elif provider_name == "ollama":
-            if _ollama_client.client is None:
-                await _ollama_client.initialize()
-            return await _ollama_client.generate(
-                model, prompt, system, max_tokens, temperature, stream
-            )
         
         elif provider_name == "groq":
             if _groq_client.client is None:
@@ -1362,14 +1086,14 @@ class NeverFailLLM:
 # Factory Functions and Public API
 # ═══════════════════════════════════════════════════════════════════════════
 
-def get_llm(provider: str = "ollama", model: str = None) -> NeverFailLLM:
+def get_llm(provider: str = "bedrock", model: str = None) -> NeverFailLLM:
     """Get never-fail LLM instance with automatic fallback"""
     return NeverFailLLM(provider, model)
 
 async def smart_chat(
     prompt: str,
     system: str = None,
-    preferred_provider: str = "ollama",
+    preferred_provider: str = "bedrock",
     max_tokens: int = None,
     temperature: float = None,
     fallback_providers: List[str] = None
@@ -1460,19 +1184,10 @@ async def health_check() -> Dict[str, Any]:
             circuit_breaker = health_monitor.get_circuit_breaker(provider_name)
             health["circuit_breakers"][provider_name] = circuit_breaker.get_status()
             
-            if provider_name == "ollama":
-                if _ollama_client.client is None:
-                    await _ollama_client.initialize()
-                ollama_healthy = await _ollama_client.health_check()
-                health["providers"][provider_name] = {
-                    "status": "healthy" if ollama_healthy else "unhealthy",
-                    "models_cached": len(_ollama_client.model_cache)
-                }
-            else:
-                # For other providers, just check if they can be initialized
-                health["providers"][provider_name] = {
-                    "status": "available" if circuit_breaker.can_execute() else "unavailable"
-                }
+            # For all providers, just check if they can be initialized
+            health["providers"][provider_name] = {
+                "status": "available" if circuit_breaker.can_execute() else "unavailable"
+            }
                 
         except Exception as e:
             health["providers"][provider_name] = {
@@ -1494,18 +1209,196 @@ async def health_check() -> Dict[str, Any]:
     health["check_duration"] = time.time() - start_time
     return health
 
+async def initialize_all_enabled_models():
+    """Initialize ALL enabled models at startup for instant inference"""
+    print("🚀 INITIALIZING ALL ENABLED MODELS FOR INSTANT INFERENCE")
+    print("=" * 60)
+    
+    initialization_results = {}
+    total_start_time = time.time()
+    
+    # Get all enabled providers
+    enabled_providers = [
+        (name, config) for name, config in config.providers.items() 
+        if config.enabled and has_required_credentials(name)
+    ]
+    
+    if not enabled_providers:
+        print("⚠️ No enabled providers with valid credentials found")
+        return {"success": False, "message": "No providers available"}
+    
+    print(f"📋 Found {len(enabled_providers)} enabled providers with credentials")
+    
+    # Initialize each provider in parallel for maximum speed
+    async def initialize_provider(provider_name: str, provider_config: ProviderConfig):
+        """Initialize a single provider with detailed logging"""
+        start_time = time.time()
+        
+        try:
+            print(f"🔄 Initializing {provider_name}...")
+            
+            if provider_name == "bedrock":
+                if not _bedrock_client.initialized:
+                    await _bedrock_client.initialize()
+                result = {"status": "initialized", "models": provider_config.models}
+                
+                
+            elif provider_name == "groq":
+                if _groq_client.client is None:
+                    await _groq_client.initialize()
+                result = {"status": "initialized", "models": provider_config.models}
+                
+            elif provider_name == "openai":
+                if _openai_client.client is None:
+                    await _openai_client.initialize()
+                result = {"status": "initialized", "models": provider_config.models}
+                
+            elif provider_name == "gemini":
+                if not _gemini_client.initialized:
+                    await _gemini_client.initialize()
+                result = {"status": "initialized", "models": provider_config.models}
+                
+            elif provider_name == "deepseek":
+                if _deepseek_client.client is None:
+                    await _deepseek_client.initialize()
+                result = {"status": "initialized", "models": provider_config.models}
+                
+            else:
+                result = {"status": "skipped", "reason": "unknown_provider"}
+            
+            duration = time.time() - start_time
+            result["initialization_time"] = round(duration, 2)
+            
+            print(f"✅ {provider_name} initialized successfully in {duration:.2f}s")
+            return provider_name, result
+            
+        except Exception as e:
+            duration = time.time() - start_time
+            error_result = {
+                "status": "failed",
+                "error": str(e),
+                "initialization_time": round(duration, 2)
+            }
+            print(f"❌ {provider_name} failed to initialize: {e}")
+            return provider_name, error_result
+    
+    # Initialize all providers in parallel
+    initialization_tasks = [
+        initialize_provider(name, provider_config) 
+        for name, provider_config in enabled_providers
+    ]
+    
+    results = await asyncio.gather(*initialization_tasks, return_exceptions=True)
+    
+    # Process results
+    successful_providers = []
+    failed_providers = []
+    
+    for result in results:
+        if isinstance(result, Exception):
+            failed_providers.append(f"unknown: {result}")
+        else:
+            provider_name, provider_result = result
+            initialization_results[provider_name] = provider_result
+            
+            if provider_result["status"] == "initialized":
+                successful_providers.append(provider_name)
+            else:
+                failed_providers.append(f"{provider_name}: {provider_result.get('error', 'unknown')}")
+    
+    total_duration = time.time() - total_start_time
+    
+    # Summary
+    print("=" * 60)
+    print(f"🎉 MODEL INITIALIZATION COMPLETE in {total_duration:.2f}s")
+    print(f"✅ Successfully initialized: {len(successful_providers)} providers")
+    print(f"❌ Failed to initialize: {len(failed_providers)} providers")
+    
+    if successful_providers:
+        print(f"📦 Ready providers: {', '.join(successful_providers)}")
+    
+    if failed_providers:
+        print(f"⚠️ Failed providers: {', '.join(failed_providers)}")
+    
+    # Warm up test for successful providers
+    if successful_providers:
+        print("🔥 PERFORMING WARM-UP TEST...")
+        warmup_success = await perform_warmup_test(successful_providers[:2])  # Test top 2 providers
+        print(f"🔥 Warm-up test: {'✅ PASSED' if warmup_success else '⚠️ PARTIAL'}")
+    
+    print("⚡ ALL MODELS READY FOR INSTANT INFERENCE!")
+    print("=" * 60)
+    
+    return {
+        "success": len(successful_providers) > 0,
+        "total_duration": round(total_duration, 2),
+        "successful_providers": successful_providers,
+        "failed_providers": failed_providers,
+        "initialization_results": initialization_results,
+        "ready_for_inference": len(successful_providers) > 0
+    }
+
+def has_required_credentials(provider_name: str) -> bool:
+    """Check if provider has required credentials configured"""
+    if provider_name == "bedrock":
+        return bool(settings.aws_bedrock_access_key_id and settings.aws_bedrock_secret_access_key)
+    elif provider_name == "groq":
+        return bool(settings.groq_api_key)
+    elif provider_name == "openai":
+        return bool(settings.openai_api_key)
+    elif provider_name == "gemini":
+        return bool(settings.gemini_api_key)
+    elif provider_name == "deepseek":
+        return bool(settings.deepseek_api_key)
+    else:
+        return False
+
+async def perform_warmup_test(providers_to_test: List[str]) -> bool:
+    """Perform a quick warm-up test to ensure models are working"""
+    test_prompt = "Hello"
+    successful_tests = 0
+    
+    for provider_name in providers_to_test:
+        try:
+            print(f"🧪 Testing {provider_name}...")
+            llm = get_llm(provider=provider_name)
+            
+            # Quick test with timeout
+            response = await asyncio.wait_for(
+                llm.chat(prompt=test_prompt, max_tokens=10),
+                timeout=30  # 30 second timeout for warmup test
+            )
+            
+            if response and len(response.strip()) > 0:
+                print(f"✅ {provider_name} warmup test passed")
+                successful_tests += 1
+            else:
+                print(f"⚠️ {provider_name} returned empty response")
+                
+        except asyncio.TimeoutError:
+            print(f"⚠️ {provider_name} warmup test timed out")
+        except Exception as e:
+            print(f"⚠️ {provider_name} warmup test failed: {e}")
+    
+    return successful_tests > 0
+
 async def initialize_llm_factory():
-    """Initialize the never-fail LLM factory with all optimizations"""
+    """Initialize the never-fail LLM factory with all optimizations (backward compatibility)"""
     try:
-        await _ollama_client.initialize()
-        print("⚡ Never-Fail LLM Factory initialized successfully")
+        # Use the new comprehensive initialization
+        result = await initialize_all_enabled_models()
+        
+        if result["success"]:
+            print("⚡ Never-Fail LLM Factory initialized successfully")
+        else:
+            print("⚠️ LLM Factory initialized with limited functionality")
+            
     except Exception as e:
         print(f"❌ Failed to initialize LLM Factory: {e}")
         # Don't raise - allow other providers to work
 
 async def cleanup_llm_factory():
     """Clean up LLM factory resources"""
-    await _ollama_client.close()
     print("⚡ Never-Fail LLM Factory cleaned up")
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1513,10 +1406,11 @@ async def cleanup_llm_factory():
 # ═══════════════════════════════════════════════════════════════════════════
 
 class OllamaChat:
-    """Backward compatibility class for OllamaChat"""
+    """Backward compatibility class for OllamaChat - now uses Bedrock as default"""
     def __init__(self, model: str = None):
-        self.model = model or config.providers["ollama"].models[0]
-        self.llm = NeverFailLLM("ollama", self.model)
+        # Use bedrock as the default provider since ollama is removed
+        self.model = model or "anthropic.claude-3-haiku-20240307-v1:0"
+        self.llm = NeverFailLLM("bedrock", self.model)
     
     async def chat(
         self,
@@ -1533,26 +1427,14 @@ class OllamaChat:
             temperature=temperature
         )
 
-# Legacy function aliases for backward compatibility
+    # Legacy function aliases for backward compatibility
 async def get_available_models() -> List[str]:
     """Get available models from all providers"""
     models = []
     
-    # Add Ollama models
-    try:
-        if _ollama_client.client is None:
-            await _ollama_client.initialize()
-        
-        ollama_models = await _ollama_client.async_client.list()
-        models.extend([model['name'] for model in ollama_models.get('models', [])])
-    except Exception as e:
-        print(f"Failed to get Ollama models: {e}")
-        # Add default models as fallback
-        models.extend(config.providers["ollama"].models)
-    
-    # Add other provider models
+    # Add models from all enabled providers
     for provider_name, provider_config in config.providers.items():
-        if provider_name != "ollama" and provider_config.enabled:
+        if provider_config.enabled:
             models.extend(provider_config.models)
     
     return models

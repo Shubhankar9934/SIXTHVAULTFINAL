@@ -66,7 +66,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import Link from "next/link"
 import SixthvaultLogo from "@/components/SixthvaultLogo"
-import { documentStore, type DocumentData } from "@/lib/document-store"
+import { documentStore, type DocumentData, type ProcessingDocument } from "@/lib/document-store"
 import { aiService } from "@/lib/ai-service"
 import { ragApiClient, type BackendDocument, type WebSocketMessage, type AvailableModel, type ModelProvider } from "@/lib/api-client"
 import { RouteGuard } from "@/components/route-guard"
@@ -77,7 +77,7 @@ interface Document {
   name: string
   size: number
   type: string
-  status: "uploading" | "processing" | "completed" | "error"
+  status: "uploading" | "processing" | "completed" | "error" | "waiting" // Added "waiting" status
   progress: number
   uploadDate: string
   language?: string
@@ -95,12 +95,14 @@ interface Document {
   processingStage?: string
   statusMessage?: string
   processingTime?: number
+  processingOrder?: number // Add for sequential progress tracking
 }
 
 function DocumentsPageContent() {
   const { logout } = useAuth()
   const [activeTab, setActiveTab] = useState("dashboard")
   const [documents, setDocuments] = useState<Document[]>([])
+  const [processingDocuments, setProcessingDocuments] = useState<ProcessingDocument[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [newTags, setNewTags] = useState<Record<string, string>>({})
@@ -548,132 +550,208 @@ function DocumentsPageContent() {
     }
   }, [selectedModel])
 
-  // Load documents from backend on mount with real-time updates
+  // FIXED: Proper integration with document store background processing
   useEffect(() => {
     let isMounted = true
     let unsubscribeFromUpdates: (() => void) | null = null
+    let unsubscribeFromProcessing: (() => void) | null = null
 
-    const loadDocuments = async () => {
+    const initializeDocuments = async () => {
       try {
-        console.log('Documents: Loading documents from backend with real-time updates')
+        console.log('Documents: Initializing with document store integration')
         
-        // Add loading timeout warning for ngrok tunnels
-        const loadingTimeout = setTimeout(() => {
-          console.warn('Documents: Document loading taking longer than expected (ngrok tunnel may have higher latency)')
-        }, 5000)
+        // STEP 1: Initialize background processing in document store
+        documentStore.initializeBackgroundProcessing()
         
-        // Fetch documents with enhanced error handling
-        const docs = await documentStore.getDocuments()
-        clearTimeout(loadingTimeout)
+        // STEP 2: Load processing documents from document store
+        const processingDocs = documentStore.getProcessingDocuments()
+        console.log('Documents: Found', processingDocs.length, 'processing documents')
+        
+        // STEP 3: Load completed documents from document store
+        const completedDocs = await documentStore.getDocuments()
+        console.log('Documents: Loaded', completedDocs.length, 'completed documents')
         
         if (!isMounted) return
 
-        // Convert to Document format for this page
-        const convertedDocs: Document[] = docs.map(doc => ({
-          id: doc.id,
-          name: doc.name,
-          size: doc.size,
-          type: doc.type,
-          status: "completed" as const,
-          progress: 100,
-          uploadDate: doc.uploadDate,
-          language: doc.language,
-          summary: doc.summary,
-          themes: doc.themes || [],
-          keywords: doc.keywords || [],
-          demographics: doc.demographics || [],
-          mainTopics: doc.mainTopics || doc.themes || [],
-          sentiment: doc.sentiment || "neutral",
-          readingLevel: doc.readingLevel || "intermediate",
-          keyInsights: doc.keyInsights || [],
-          content: doc.content || ""
-        }))
+        // STEP 4: Convert and merge all documents
+        const allDocuments: Document[] = []
         
-        setDocuments(convertedDocs)
-        console.log('Documents: Successfully loaded', convertedDocs.length, 'documents from backend')
-        
-        // Subscribe to real-time updates from document store
-        unsubscribeFromUpdates = documentStore.subscribeToUpdates((updatedDocs) => {
-          if (!isMounted) return
-          
-          console.log('Documents: Received real-time update from document store')
-          
-          // Convert updated documents to local format
-          const convertedUpdatedDocs: Document[] = updatedDocs.map(doc => ({
+        // Add processing documents
+        processingDocs.forEach(doc => {
+          allDocuments.push({
             id: doc.id,
             name: doc.name,
             size: doc.size,
             type: doc.type,
-            status: "completed" as const,
-            progress: 100,
+            status: doc.status,
+            progress: doc.progress,
             uploadDate: doc.uploadDate,
-            language: doc.language,
-            summary: doc.summary,
+            batchId: doc.batchId,
+            processingStage: doc.processingStage,
+            statusMessage: doc.statusMessage,
+            processingTime: doc.processingTime,
+            processingOrder: doc.processingOrder,
+            language: doc.language || 'English',
+            summary: doc.summary || '',
             themes: doc.themes || [],
             keywords: doc.keywords || [],
             demographics: doc.demographics || [],
-            mainTopics: doc.mainTopics || doc.themes || [],
-            sentiment: doc.sentiment || "neutral",
-            readingLevel: doc.readingLevel || "intermediate",
+            mainTopics: doc.mainTopics || [],
+            sentiment: doc.sentiment || 'neutral',
+            readingLevel: doc.readingLevel || 'intermediate',
             keyInsights: doc.keyInsights || [],
-            content: doc.content || ""
-          }))
-          
-          // Update local state with real-time data
-          setDocuments(prevDocs => {
-            // Merge with existing processing documents to preserve upload state
-            const processingDocs = prevDocs.filter(doc => doc.status !== "completed")
-            const completedDocs = convertedUpdatedDocs
-            
-            // Combine processing and completed documents
-            const mergedDocs = [...processingDocs, ...completedDocs]
-            
-            console.log('Documents: Updated state with real-time data:', {
-              processing: processingDocs.length,
-              completed: completedDocs.length,
-              total: mergedDocs.length
+            content: doc.content || '',
+            error: doc.error
+          })
+        })
+        
+        // Add completed documents (avoid duplicates)
+        completedDocs.forEach(doc => {
+          // Only add if not already in processing
+          if (!allDocuments.some(existing => existing.id === doc.id)) {
+            allDocuments.push({
+              id: doc.id,
+              name: doc.name,
+              size: doc.size,
+              type: doc.type,
+              status: "completed" as const,
+              progress: 100,
+              uploadDate: doc.uploadDate,
+              language: doc.language,
+              summary: doc.summary,
+              themes: doc.themes || [],
+              keywords: doc.keywords || [],
+              demographics: doc.demographics || [],
+              mainTopics: doc.mainTopics || doc.themes || [],
+              sentiment: doc.sentiment || "neutral",
+              readingLevel: doc.readingLevel || "intermediate",
+              keyInsights: doc.keyInsights || [],
+              content: doc.content || ""
             })
+          }
+        })
+        
+        // Set all documents at once
+        setDocuments(allDocuments)
+        console.log('Documents: Set', allDocuments.length, 'total documents (', processingDocs.length, 'processing,', completedDocs.length, 'completed)')
+        
+        // STEP 5: Subscribe to completed document updates
+        unsubscribeFromUpdates = documentStore.subscribeToUpdates((updatedCompletedDocs) => {
+          if (!isMounted) return
+          
+          console.log('Documents: Received completed documents update:', updatedCompletedDocs.length)
+          
+          setDocuments(prevDocs => {
+            // Keep processing documents, update completed ones
+            const processingDocs = prevDocs.filter(doc => doc.status !== "completed")
+            
+            // Convert updated completed documents
+            const newCompletedDocs: Document[] = updatedCompletedDocs.map(doc => ({
+              id: doc.id,
+              name: doc.name,
+              size: doc.size,
+              type: doc.type,
+              status: "completed" as const,
+              progress: 100,
+              uploadDate: doc.uploadDate,
+              language: doc.language,
+              summary: doc.summary,
+              themes: doc.themes || [],
+              keywords: doc.keywords || [],
+              demographics: doc.demographics || [],
+              mainTopics: doc.mainTopics || doc.themes || [],
+              sentiment: doc.sentiment || "neutral",
+              readingLevel: doc.readingLevel || "intermediate",
+              keyInsights: doc.keyInsights || [],
+              content: doc.content || ""
+            }))
+            
+            // Remove duplicates between processing and completed
+            const uniqueCompletedDocs = newCompletedDocs.filter(completedDoc => 
+              !processingDocs.some(processingDoc => processingDoc.id === completedDoc.id)
+            )
+            
+            const mergedDocs = [...processingDocs, ...uniqueCompletedDocs]
+            console.log('Documents: Updated with completed documents:', mergedDocs.length, 'total')
+            
+            return mergedDocs
+          })
+        })
+
+        // STEP 6: Subscribe to processing document updates
+        unsubscribeFromProcessing = documentStore.subscribeToProcessingUpdates((updatedProcessingDocs) => {
+          if (!isMounted) return
+          
+          console.log('Documents: Received processing documents update:', updatedProcessingDocs.length)
+          
+          setDocuments(prevDocs => {
+            // Keep completed documents
+            const completedDocs = prevDocs.filter(doc => doc.status === "completed")
+            
+            // Convert updated processing documents
+            const newProcessingDocs: Document[] = updatedProcessingDocs.map(doc => ({
+              id: doc.id,
+              name: doc.name,
+              size: doc.size,
+              type: doc.type,
+              status: doc.status,
+              progress: doc.progress,
+              uploadDate: doc.uploadDate,
+              batchId: doc.batchId,
+              processingStage: doc.processingStage,
+              statusMessage: doc.statusMessage,
+              processingTime: doc.processingTime,
+              processingOrder: doc.processingOrder,
+              language: doc.language || 'English',
+              summary: doc.summary || '',
+              themes: doc.themes || [],
+              keywords: doc.keywords || [],
+              demographics: doc.demographics || [],
+              mainTopics: doc.mainTopics || [],
+              sentiment: doc.sentiment || 'neutral',
+              readingLevel: doc.readingLevel || 'intermediate',
+              keyInsights: doc.keyInsights || [],
+              content: doc.content || '',
+              error: doc.error
+            }))
+            
+            // Remove duplicates between processing and completed
+            const uniqueProcessingDocs = newProcessingDocs.filter(processingDoc => 
+              !completedDocs.some(completedDoc => completedDoc.id === processingDoc.id)
+            )
+            
+            const mergedDocs = [...uniqueProcessingDocs, ...completedDocs]
+            console.log('Documents: Updated with processing documents:', mergedDocs.length, 'total')
             
             return mergedDocs
           })
         })
         
       } catch (error) {
-        console.error('Documents: Critical error loading documents:', error)
-        
-        // Show user-friendly error for ngrok issues
-        if (error instanceof Error && (
-          error.message.includes('Authentication failed') ||
-          error.message.includes('Failed to fetch') ||
-          error.message.includes('NetworkError')
-        )) {
-          console.error('Documents: Network/Auth error detected - may be ngrok tunnel issue')
-          // Could show a toast notification here if needed
+        console.error('Documents: Error initializing:', error)
+        if (isMounted) {
+          setDocuments([])
         }
-        
-        if (!isMounted) return
-
-        // Set empty state on error (no localStorage fallback)
-        setDocuments([])
       }
     }
 
-    const initializeData = async () => {
-      await loadDocuments()
+    // Initialize everything
+    initializeDocuments().then(() => {
       if (isMounted) {
         checkAiStatus()
       }
-    }
-
-    initializeData()
+    })
 
     return () => {
       isMounted = false
       if (unsubscribeFromUpdates) {
         unsubscribeFromUpdates()
       }
+      if (unsubscribeFromProcessing) {
+        unsubscribeFromProcessing()
+      }
     }
-  }, []) // Remove any dependencies to prevent re-runs
+  }, [])
 
   // CRITICAL FIX: Add real-time processing updates listener
   useEffect(() => {
@@ -800,13 +878,360 @@ function DocumentsPageContent() {
 
     if (validFiles.length === 0) return
 
+    // ULTIMATE FIX: True isolated file processing with distinct progress tracking
+    console.log('🔄 STARTING ISOLATED FILE PROCESSING for', validFiles.length, 'files')
+    
+    // First, add ALL files to UI immediately with different starting progress for visual distinction
+    const tempDocuments: Document[] = validFiles.map((file, index) => ({
+      id: `isolated_${index}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      status: index === 0 ? "uploading" : "waiting", // Only first file starts immediately
+      progress: index === 0 ? 0 : 0, // All start at 0 for clear distinction
+      uploadDate: new Date().toISOString().split("T")[0],
+      processingOrder: index,
+      statusMessage: index === 0 ? 'File 1: Starting upload...' : `File ${index + 1}: Waiting in queue...`
+    }))
+    
+    // Add all files to UI at once
+    setDocuments((prev) => [...prev, ...tempDocuments])
+    
+    // Process files one by one with COMPLETELY isolated progress tracking
+    for (let i = 0; i < validFiles.length; i++) {
+      const file = validFiles[i]
+      const tempDoc = tempDocuments[i]
+      
+      console.log(`📁 Starting isolated processing for file ${i + 1}/${validFiles.length}: ${file.name}`)
+      
+      // Mark current file as active and others as waiting
+      setDocuments((prev) => 
+        prev.map((doc) => {
+          if (doc.id === tempDoc.id) {
+            return { 
+              ...doc, 
+              status: "uploading", 
+              progress: 0, // Always start from 0 for each file
+              statusMessage: `File ${i + 1}/${validFiles.length}: Upload starting...` 
+            }
+          } else if (prev.findIndex(d => d.id === doc.id) === tempDocuments.findIndex(t => t.id === doc.id) && tempDocuments.findIndex(t => t.id === doc.id) > i) {
+            return { 
+              ...doc, 
+              status: "waiting", 
+              statusMessage: `File ${tempDocuments.findIndex(t => t.id === doc.id) + 1}/${validFiles.length}: Waiting in queue...` 
+            }
+          }
+          return doc
+        })
+      )
+      
+      try {
+        await processFileInIsolation(file, tempDoc.id, i + 1, validFiles.length)
+        console.log(`✅ Isolated file ${i + 1}/${validFiles.length} completed: ${file.name}`)
+      } catch (error) {
+        console.error(`❌ Isolated file ${i + 1}/${validFiles.length} failed: ${file.name}`, error)
+        // Mark as error but continue with next file
+        setDocuments((prev) => 
+          prev.map((doc) => 
+            doc.id === tempDoc.id
+              ? { 
+                  ...doc, 
+                  status: "error", 
+                  progress: 0,
+                  error: `Processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                  statusMessage: `File ${i + 1}/${validFiles.length}: Failed ❌`
+                }
+              : doc
+          )
+        )
+      }
+      
+      // Brief pause between files
+      if (i < validFiles.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 800))
+        
+        // Show next file is preparing
+        if (i + 1 < tempDocuments.length) {
+          setDocuments((prev) => 
+            prev.map((doc) => 
+              doc.id === tempDocuments[i + 1].id
+                ? { ...doc, statusMessage: `File ${i + 2}/${validFiles.length}: Next in queue...` }
+                : doc
+            )
+          )
+        }
+      }
+    }
+    
+    console.log('✅ All isolated files processed')
+  }, [])
+
+  // ULTIMATE FIX: Completely isolated file processor with unique progress tracking
+  const processFileInIsolation = useCallback(async (file: File, isolatedDocId: string, currentFile: number, totalFiles: number) => {
+    return new Promise<void>(async (resolve, reject) => {
+      // Create completely isolated progress state for THIS file only
+      const isolatedProgress = {
+        value: 0,
+        stage: 'init',
+        isComplete: false,
+        lastUpdate: Date.now(),
+        fileId: isolatedDocId
+      }
+      
+      let isolatedTimer: NodeJS.Timeout | null = null
+      let completionTimer: NodeJS.Timeout
+
+      // COMPLETE FIX: Function to update progress with strict never-decrease policy
+      const updateIsolatedProgress = (backendProgress: number, statusMessage: string, newStage?: string) => {
+        // CRITICAL: Ensure progress never decreases - use Math.max with current value
+        const safeProgress = Math.max(isolatedProgress.value, Math.min(backendProgress, 90))
+        isolatedProgress.value = safeProgress
+        isolatedProgress.lastUpdate = Date.now()
+        if (newStage) isolatedProgress.stage = newStage
+        
+        // Log with both backend and safe progress values for debugging
+        console.log(`🔄 PROGRESS SYNC for ${file.name}: Backend=${backendProgress}% → UI=${safeProgress}% - ${statusMessage}`)
+        
+        setDocuments((prev) => 
+          prev.map((doc) => {
+            // CRITICAL: Only update the document with this exact ID
+            if (doc.id === isolatedDocId) {
+              return { 
+                ...doc, 
+                progress: safeProgress, // Use safe progress that never decreases
+                statusMessage: `${statusMessage} (${Math.round(safeProgress)}%)` // Show actual UI progress percentage
+              }
+            }
+            // Leave ALL other documents completely untouched
+            return doc
+          })
+        )
+      }
+
+      const completeIsolatedFile = () => {
+        if (!isolatedProgress.isComplete) {
+          isolatedProgress.isComplete = true
+          if (isolatedTimer) clearInterval(isolatedTimer)
+          clearTimeout(completionTimer)
+          console.log(`✅ ISOLATED COMPLETION for ${file.name}`)
+          resolve()
+        }
+      }
+
+      try {
+        console.log(`📤 ISOLATED UPLOAD START: ${file.name} (ID: ${isolatedDocId})`)
+        
+        // Phase 1: Upload initiation (0-5%)
+        updateIsolatedProgress(2, `File ${currentFile}/${totalFiles}: Preparing upload...`, 'preparing')
+        
+        // Upload this single file with its own batch
+        const uploadResponse = await ragApiClient.uploadFiles([file])
+        const batchId = uploadResponse.batch_id
+        
+        console.log(`✅ ISOLATED UPLOAD SUCCESS: ${file.name}, Batch: ${batchId}`)
+
+        // Phase 2: Upload complete, starting processing (5-15%)
+        updateIsolatedProgress(10, `File ${currentFile}/${totalFiles}: Upload complete, starting AI processing...`, 'uploaded')
+        
+        // Update to processing status
+        setDocuments((prev) => 
+          prev.map((doc) => 
+            doc.id === isolatedDocId 
+              ? { 
+                  ...doc, 
+                  status: "processing", 
+                  progress: 15,
+                  batchId: batchId,
+                  statusMessage: `File ${currentFile}/${totalFiles}: AI processing initiated...`
+                }
+              : doc
+          )
+        )
+        
+        isolatedProgress.value = 15
+        isolatedProgress.stage = 'processing'
+
+        // Phase 3: Gradual progress simulation for this file only
+        isolatedTimer = setInterval(() => {
+          if (!isolatedProgress.isComplete && isolatedProgress.value < 80) {
+            const increment = Math.random() * 3 + 1 // Random 1-4% increments
+            const newProgress = Math.min(isolatedProgress.value + increment, 80)
+            updateIsolatedProgress(
+              newProgress, 
+              `File ${currentFile}/${totalFiles}: AI analysis ${Math.round(newProgress)}% complete...`, 
+              'ai_processing'
+            )
+          }
+        }, 4000) // Update every 4 seconds for this file only
+
+        // Phase 4: WebSocket connection for real-time updates for THIS file only
+        const isolatedWS = ragApiClient.createReliableWebSocket(batchId, (message: any) => {
+          try {
+            console.log(`📨 ISOLATED WebSocket for ${file.name}:`, message.type, message.data)
+
+            switch (message.type) {
+              case 'processing':
+                if (message.data?.progress && typeof message.data.progress === 'number') {
+                  const wsProgress = Math.max(isolatedProgress.value, Math.min(message.data.progress, 85))
+                  updateIsolatedProgress(
+                    wsProgress, 
+                    `File ${currentFile}/${totalFiles}: ${message.data?.message || `Processing ${Math.round(wsProgress)}%...`}`,
+                    'ws_processing'
+                  )
+                }
+                break
+
+              case 'completed':
+              case 'file_processing_completed':
+                console.log(`🎉 ISOLATED COMPLETION: ${file.name}`)
+                
+                // Stop gradual progress
+                if (isolatedTimer) {
+                  clearInterval(isolatedTimer)
+                  isolatedTimer = null
+                }
+                
+                // Update to 100% completion with AI data
+                setDocuments((prev) => 
+                  prev.map((doc) => {
+                    if (doc.id === isolatedDocId) {
+                      const completedData = message.data || {}
+                      return {
+                        ...doc,
+                        status: "completed" as const,
+                        progress: 100,
+                        summary: completedData.summary || '',
+                        themes: completedData.themes || [],
+                        keywords: completedData.keywords || completedData.themes || [],
+                        demographics: completedData.demographics || [],
+                        mainTopics: completedData.themes || [],
+                        keyInsights: completedData.insights ? [completedData.insights] : [],
+                        language: completedData.language || 'English',
+                        statusMessage: `File ${currentFile}/${totalFiles}: Analysis complete! ✅`
+                      }
+                    }
+                    return doc
+                  })
+                )
+                
+                isolatedProgress.value = 100
+                setTimeout(completeIsolatedFile, 600)
+                break
+
+              case 'error':
+                console.error(`❌ ISOLATED ERROR for ${file.name}:`, message.data)
+                
+                if (isolatedTimer) {
+                  clearInterval(isolatedTimer)
+                  isolatedTimer = null
+                }
+                
+                setDocuments((prev) => 
+                  prev.map((doc) => {
+                    if (doc.id === isolatedDocId) {
+                      return { 
+                        ...doc, 
+                        status: "error", 
+                        progress: 0,
+                        error: message.data?.error || 'Processing failed',
+                        statusMessage: `File ${currentFile}/${totalFiles}: Processing failed ❌`
+                      }
+                    }
+                    return doc
+                  })
+                )
+                reject(new Error(message.data?.error || 'Processing failed'))
+                break
+
+              default:
+                // Handle any other progress updates
+                if (message.data?.progress && typeof message.data.progress === 'number') {
+                  const generalProgress = Math.max(isolatedProgress.value, Math.min(message.data.progress, 85))
+                  updateIsolatedProgress(
+                    generalProgress, 
+                    `File ${currentFile}/${totalFiles}: ${message.data?.message || `Processing ${Math.round(generalProgress)}%...`}`,
+                    'general_update'
+                  )
+                }
+                break
+            }
+          } catch (error) {
+            console.error(`❌ ISOLATED WebSocket error for ${file.name}:`, error)
+          }
+        })
+
+        // Connect the isolated WebSocket
+        await isolatedWS.connect()
+        
+        // Timeout for this isolated file (6 minutes)
+        completionTimer = setTimeout(() => {
+          if (!isolatedProgress.isComplete) {
+            console.warn(`⏱️ ISOLATED TIMEOUT for ${file.name}`)
+            
+            if (isolatedTimer) {
+              clearInterval(isolatedTimer)
+              isolatedTimer = null
+            }
+            
+            isolatedWS.disconnect()
+            
+            // Mark as completed due to timeout
+            setDocuments((prev) => 
+              prev.map((doc) => {
+                if (doc.id === isolatedDocId) {
+                  return { 
+                    ...doc, 
+                    status: "completed", 
+                    progress: 100,
+                    statusMessage: `File ${currentFile}/${totalFiles}: Completed (timeout) ⏱️`,
+                    language: 'English'
+                  }
+                }
+                return doc
+              })
+            )
+            
+            completeIsolatedFile()
+          }
+        }, 360000) // 6 minutes for this isolated file
+
+        // Store isolated cleanup function
+        ;(window as any)[`cleanup_isolated_${isolatedDocId}`] = () => {
+          if (isolatedTimer) clearInterval(isolatedTimer)
+          isolatedWS.disconnect()
+          clearTimeout(completionTimer)
+        }
+
+      } catch (error) {
+        console.error(`❌ ISOLATED UPLOAD FAILED for ${file.name}:`, error)
+        
+        setDocuments((prev) => 
+          prev.map((doc) => 
+            doc.id === isolatedDocId
+              ? { 
+                  ...doc, 
+                  status: "error", 
+                  progress: 0,
+                  error: `Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                  statusMessage: `File ${currentFile}/${totalFiles}: Upload failed ❌`
+                }
+              : doc
+          )
+        )
+        
+        reject(error)
+      }
+    })
+  }, [])
+
+  const processFilesSequentially = useCallback(async (fileList: File[], currentFile: number, totalFiles: number) => {
+    const file = fileList[0] // Only one file at a time
+
     // PROFESSIONAL STATE DEBUGGING AND VALIDATION
-    console.log('=== PROFESSIONAL PROVIDER/MODEL VALIDATION ===')
+    console.log('=== SEQUENTIAL PROCESSING FILE', currentFile, 'of', totalFiles, '===')
+    console.log('Processing file:', file.name)
     console.log('State - selectedProvider:', selectedProvider)
     console.log('State - selectedModel:', selectedModel)
-    console.log('State - modelProviders:', modelProviders)
-    console.log('State - availableModels:', availableModels)
-    console.log('State - isProviderLoading:', isProviderLoading)
     
     // Get current values from state with fallback logic
     let finalProvider = selectedProvider
@@ -863,42 +1288,9 @@ function DocumentsPageContent() {
       localStorage.setItem('sixthvault_preferred_provider', finalProvider)
       localStorage.setItem('sixthvault_preferred_model', finalModel)
     }
-    
-    // SOFT VALIDATION: Log warnings but don't block upload
-    const providerExists = modelProviders.find(p => p.name === finalProvider)
-    if (!providerExists) {
-      console.warn('Selected provider not found in available providers, but proceeding with upload')
-      console.warn('Selected provider:', finalProvider)
-      console.warn('Available providers:', modelProviders.map(p => p.name))
-    }
-    
-    const modelExists = providerExists?.models.find(m => m.name === finalModel)
-    if (!modelExists && providerExists) {
-      console.warn('Selected model not found for provider, but proceeding with upload')
-      console.warn('Selected model:', finalModel)
-      console.warn('Available models for provider:', providerExists.models.map(m => m.name))
-    }
-    
-    // All validations passed - selections are guaranteed to be valid
-    console.log('=== VALIDATION PASSED - GUARANTEED VALID SELECTIONS ===')
-    console.log('✓ Provider:', finalProvider, '(validated)')
-    console.log('✓ Model:', finalModel, '(validated)')
-    console.log('✓ Provider object:', providerExists)
-    console.log('✓ Model object:', modelExists)
-    console.log('=== END COMPREHENSIVE VALIDATION ===')
-    
-    // Get current provider object for logging
-    const currentProvider = modelProviders.find(p => p.name === finalProvider)
-    
-    console.log('=== PROCESSING WITH USER SELECTIONS ===')
-    console.log('Selected Provider:', finalProvider)
-    console.log('Selected Model:', finalModel)
-    console.log('Provider Object:', currentProvider)
-    console.log('Available Models:', currentProvider?.models.map((m: AvailableModel) => m.name))
-    console.log('=== END SELECTION INFO ===')
 
-    // Create temporary documents for UI with unique IDs
-    const tempDocuments: Document[] = validFiles.map((file) => ({
+    // Create temporary document for UI with unique ID
+    const tempDocument: Document = {
       id: `temp_${Math.random().toString(36).substr(2, 9)}_${Date.now()}`,
       name: file.name,
       size: file.size,
@@ -906,74 +1298,102 @@ function DocumentsPageContent() {
       status: "uploading",
       progress: 0,
       uploadDate: new Date().toISOString().split("T")[0],
-    }))
+      batchId: '', // Will be set after upload
+      processingOrder: currentFile - 1, // Track processing order for sequential progress
+    }
 
-    setDocuments((prev) => [...prev, ...tempDocuments])
+    setDocuments((prev) => [...prev, tempDocument])
 
     try {
-      // Upload files to backend with enhanced logging
-      console.log('=== UPLOAD DEBUG INFO ===')
-      console.log('Files to upload:', validFiles.map(f => f.name))
-      console.log('Selected Provider State:', selectedProvider)
-      console.log('Selected Model State:', selectedModel)
-      console.log('Current Provider Object:', modelProviders.find(p => p.name === selectedProvider))
-      console.log('Available Models for Provider:', availableModels)
-      console.log('All Model Providers:', modelProviders)
+      console.log(`📤 Uploading file ${currentFile}/${totalFiles}: ${file.name}`)
       
-      // Final validation before upload - use the validated values
-      console.log('=== FINAL UPLOAD PARAMETERS ===')
-      console.log('Provider:', finalProvider)
-      console.log('Model:', finalModel)
-      console.log('Provider Type:', typeof finalProvider)
-      console.log('Model Type:', typeof finalModel)
-      
-      const uploadResponse = await ragApiClient.uploadFiles(validFiles)
+      const uploadResponse = await ragApiClient.uploadFiles(fileList)
       console.log('Upload response:', uploadResponse)
-      console.log('=== END UPLOAD DEBUG ===')
-
-      // Update documents to processing status but keep unique IDs
       const batchId = uploadResponse.batch_id
+
+      // Update document to processing status
       setDocuments((prev) => 
         prev.map((doc) => {
-          const tempDoc = tempDocuments.find(temp => temp.name === doc.name)
-          if (tempDoc) {
+          if (doc.id === tempDocument.id) {
             return { 
               ...doc, 
               status: "processing", 
-              progress: 5,
-              batchId: batchId
+              progress: 10,
+              batchId: batchId,
+              statusMessage: `Processing file ${currentFile}/${totalFiles}`
             }
           }
           return doc
         })
       )
 
-      // BACKGROUND PROCESSING PERSISTENCE DISABLED - No localStorage persistence to prevent orphaned documents
-      console.log('Background Processing: localStorage persistence disabled to prevent orphaned documents')
-
-      // Connect to document store for real-time updates
-      const cleanupDocumentStore = documentStore.connectToProcessingUpdates(batchId)
-
-      // Enhanced WebSocket connection with comprehensive message handling
+      // Sequential Progress Management System for Single File
       let isCleanedUp = false
       let progressInterval: NodeJS.Timeout | null = null
       let connectionStatus = 'connecting'
-      let connectionHealth = 0
+      let batchProgressTracker = {
+        totalFiles: 1, // Single file processing
+        completedFiles: 0,
+        currentProcessingFile: 0,
+        isSequentialProcessing: true,
+        baseProgressPerFile: 90, // Full 90% for this single file
+        priorityFileCompleted: false
+      }
       
-      // Fallback progress updater - gradually increases progress if no updates received
-      const startProgressFallback = () => {
+      // Sequential Progress Calculator
+      const calculateSequentialProgress = (fileIndex: number, stage: string): number => {
+        const baseProgress = batchProgressTracker.baseProgressPerFile * fileIndex
+        let stageProgress = 0
+        
+        // Define stage progress within each file's allocation
+        switch (stage) {
+          case 'uploading':
+            stageProgress = 0.1 * batchProgressTracker.baseProgressPerFile
+            break
+          case 'processing_started':
+            stageProgress = 0.2 * batchProgressTracker.baseProgressPerFile
+            break
+          case 'processing':
+            stageProgress = 0.6 * batchProgressTracker.baseProgressPerFile
+            break
+          case 'completing':
+            stageProgress = 0.9 * batchProgressTracker.baseProgressPerFile
+            break
+          case 'completed':
+            stageProgress = batchProgressTracker.baseProgressPerFile
+            break
+        }
+        
+        return Math.min(baseProgress + stageProgress, 90)
+      }
+      
+      // Update progress for all files in batch
+      const updateBatchProgress = () => {
+        setDocuments((prev) => 
+          prev.map((doc) => {
+            if (doc.batchId === batchId && doc.status === "processing") {
+              // Calculate progress based on current processing state
+              const currentProgress = calculateSequentialProgress(
+                doc.processingOrder || 0,
+                'processing'
+              )
+              
+              // Ensure progress never decreases
+              const newProgress = Math.max(doc.progress, Math.min(currentProgress, 90))
+              return { ...doc, progress: newProgress }
+            }
+            return doc
+          })
+        )
+      }
+      
+      // Smooth progress updater for sequential processing
+      const startSequentialProgressUpdater = () => {
         progressInterval = setInterval(() => {
-          setDocuments((prev) => 
-            prev.map((doc) => {
-              if (doc.batchId === batchId && doc.status === "processing" && doc.progress < 90) {
-                // Gradually increase progress, but cap at 90% until completion
-                const newProgress = Math.min(doc.progress + 1, 90)
-                return { ...doc, progress: newProgress }
-              }
-              return doc
-            })
-          )
-        }, 2000) // Update every 2 seconds for smoother progress
+          if (batchProgressTracker.isSequentialProcessing) {
+            updateBatchProgress()
+          }
+        }, 1000) // Update every second for smooth progress
       }
       
       const stopProgressFallback = () => {
@@ -1318,58 +1738,82 @@ function DocumentsPageContent() {
               return
 
             case 'completed':
-              // CRITICAL FIX: Handle individual file completion with immediate AI data display
+              // CRITICAL FIX: Handle individual file completion with proper deduplication
               if (message.data?.file || message.data?.filename) {
                 const messageFileName = extractFilename(message.data.file || message.data.filename || '')
                 console.log('🎯 INDIVIDUAL FILE COMPLETED:', messageFileName, 'Data:', message.data)
                 
-                setDocuments((prev) => 
-                  prev.map((doc) => {
-                    if (doc.batchId === batchId && (
+                setDocuments((prev) => {
+                  // Find all matching documents (both processing and potentially duplicated)
+                  const matchingDocs = prev.filter(doc => 
+                    doc.batchId === batchId && (
                       doc.name === messageFileName || 
                       doc.name.includes(messageFileName) || 
                       messageFileName.includes(doc.name) ||
                       (message.data.filename && doc.name === message.data.filename)
-                    )) {
-                      const completedData = message.data
-                      
-                      console.log('✅ UPDATING DOCUMENT STATE WITH AI DATA:', {
-                        filename: doc.name,
-                        summary: completedData.summary ? 'Present' : 'Missing',
-                        insights: completedData.insights ? 'Present' : 'Missing',
-                        themes: completedData.themes?.length || 0,
-                        demographics: completedData.demographics?.length || 0
-                      })
-                      
-                      // Check if all documents in this batch are completed
-                      const batchDocs = prev.filter(d => d.batchId === batchId)
-                      const completedCount = batchDocs.filter(d => d.status === "completed" || d.id === doc.id).length
-                      if (completedCount === batchDocs.length) {
-                        setTimeout(stopProgressFallback, 1000)
-                      }
-                      
-                      return {
-                        ...doc,
-                        id: completedData.doc_id || doc.id,
-                        status: "completed",
-                        progress: 100,
-                        // CRITICAL: Immediately apply ALL AI-generated data
-                        summary: completedData.summary || doc.summary || '',
-                        themes: completedData.themes || doc.themes || [],
-                        keywords: completedData.keywords || completedData.themes || doc.keywords || [],
-                        demographics: completedData.demographics || doc.demographics || [],
-                        mainTopics: completedData.themes || doc.mainTopics || [],
-                        keyInsights: completedData.insights ? [completedData.insights] : (doc.keyInsights || []),
-                        language: completedData.language || doc.language || 'English',
-                        sentiment: doc.sentiment || 'neutral',
-                        readingLevel: doc.readingLevel || 'intermediate',
-                        processingTime: completedData.processing_time || doc.processingTime,
-                        statusMessage: completedData.message || 'AI analysis completed - Summary & insights ready!'
-                      }
-                    }
-                    return doc
+                    )
+                  )
+                  
+                  if (matchingDocs.length === 0) return prev
+                  
+                  // DEDUPLICATION: Keep only the first matching document, remove duplicates
+                  const primaryDoc = matchingDocs[0]
+                  const duplicateIds = matchingDocs.slice(1).map(d => d.id)
+                  
+                  console.log('🔄 DEDUPLICATING DOCUMENTS:', {
+                    filename: messageFileName,
+                    totalMatches: matchingDocs.length,
+                    primaryDocId: primaryDoc.id,
+                    duplicatesToRemove: duplicateIds
                   })
-                )
+                  
+                  // Remove duplicates and update the primary document
+                  const updatedDocs = prev
+                    .filter(doc => !duplicateIds.includes(doc.id)) // Remove duplicates
+                    .map((doc) => {
+                      if (doc.id === primaryDoc.id) {
+                        const completedData = message.data
+                        
+                        console.log('✅ UPDATING PRIMARY DOCUMENT WITH AI DATA:', {
+                          filename: doc.name,
+                          docId: doc.id,
+                          summary: completedData.summary ? 'Present' : 'Missing',
+                          insights: completedData.insights ? 'Present' : 'Missing',
+                          themes: completedData.themes?.length || 0,
+                          demographics: completedData.demographics?.length || 0
+                        })
+                        
+                        return {
+                          ...doc,
+                          id: completedData.doc_id || doc.id,
+                          status: "completed" as const,
+                          progress: 100,
+                          // CRITICAL: Immediately apply ALL AI-generated data
+                          summary: completedData.summary || doc.summary || '',
+                          themes: completedData.themes || doc.themes || [],
+                          keywords: completedData.keywords || completedData.themes || doc.keywords || [],
+                          demographics: completedData.demographics || doc.demographics || [],
+                          mainTopics: completedData.themes || doc.mainTopics || [],
+                          keyInsights: completedData.insights ? [completedData.insights] : (doc.keyInsights || []),
+                          language: completedData.language || doc.language || 'English',
+                          sentiment: doc.sentiment || 'neutral',
+                          readingLevel: doc.readingLevel || 'intermediate',
+                          processingTime: completedData.processing_time || doc.processingTime,
+                          statusMessage: completedData.message || 'AI analysis completed - Summary & insights ready!'
+                        }
+                      }
+                      return doc
+                    })
+                  
+                  // Check if all documents in this batch are completed
+                  const batchDocs = updatedDocs.filter(d => d.batchId === batchId)
+                  const completedCount = batchDocs.filter(d => d.status === "completed").length
+                  if (completedCount === batchDocs.length) {
+                    setTimeout(stopProgressFallback, 1000)
+                  }
+                  
+                  return updatedDocs
+                })
               }
               return
 
@@ -1677,16 +2121,18 @@ function DocumentsPageContent() {
       })
 
       // Start the reliable connection and fallback progress
-      reliableWS.connect().then(() => {
-        console.log('Reliable WebSocket connection established for batch:', batchId)
-        connectionStatus = 'connected'
-        startProgressFallback()
-      }).catch((error) => {
-        console.error('Failed to establish reliable WebSocket connection:', error)
-        connectionStatus = 'failed'
-        // Still start fallback progress even if WebSocket fails
-        startProgressFallback()
-      })
+        reliableWS.connect().then(() => {
+          console.log('Reliable WebSocket connection established for batch:', batchId)
+          connectionStatus = 'connected'
+          batchProgressTracker.isSequentialProcessing = true
+          startSequentialProgressUpdater()
+        }).catch((error) => {
+          console.error('Failed to establish reliable WebSocket connection:', error)
+          connectionStatus = 'failed'
+          // Still start fallback progress even if WebSocket fails
+          batchProgressTracker.isSequentialProcessing = true
+          startSequentialProgressUpdater()
+        })
 
       // Cleanup function for WebSocket and intervals
       const cleanup = () => {
@@ -1707,10 +2153,10 @@ function DocumentsPageContent() {
 
     } catch (error) {
       console.error('Upload failed:', error)
-      // Update all temp documents to error state
+      // Update temp document to error state
       setDocuments((prev) => 
         prev.map((doc) => 
-          tempDocuments.find(temp => temp.name === doc.name)
+          doc.id === tempDocument.id
             ? { ...doc, status: "error", error: `Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}` }
             : doc
         )
@@ -1958,8 +2404,8 @@ function DocumentsPageContent() {
 
   return (
     <div className="min-h-screen bg-white relative overflow-hidden">
-      {/* Beautiful flowing wave background for entire page */}
-      <div className="absolute inset-0 z-0">
+      {/* Beautiful flowing wave background - Hidden on mobile for clean look */}
+      <div className="absolute inset-0 z-0 hidden md:block">
         <svg className="absolute inset-0 w-full h-full" viewBox="0 0 1440 800" preserveAspectRatio="xMidYMid slice">
           <defs>
             <linearGradient id="waveGradient1-page" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -2072,19 +2518,216 @@ function DocumentsPageContent() {
         </div>
       </div>
 
-      <div className="flex h-[calc(100vh-80px)]">
+      {/* Mobile: Gallery-First Layout */}
+      <div className="md:hidden">
+        {/* Mobile Header */}
+        <div className="flex items-center justify-between p-4 bg-white border-b border-gray-200">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+          >
+            <Menu className="w-5 h-5" />
+          </Button>
+          <h1 className="text-lg font-semibold text-gray-800">Documents</h1>
+          <Button variant="ghost" size="sm">
+            <Search className="w-5 h-5" />
+          </Button>
+        </div>
+
+        {/* Mobile Document Gallery */}
+        <div className="p-4 pb-24">
+          {documents.length === 0 ? (
+            <div className="text-center py-12">
+              <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <FileText className="w-8 h-8 text-gray-400" />
+              </div>
+              <h3 className="text-lg font-medium text-gray-900 mb-2">No documents yet</h3>
+              <p className="text-gray-500 mb-6">Upload your first document to get started</p>
+              <Button
+                onClick={() => document.getElementById("mobile-file-upload")?.click()}
+                className="bg-blue-500 hover:bg-blue-600 text-white"
+              >
+                <Plus className="w-4 h-4 mr-2" />
+                Upload Document
+              </Button>
+              <input
+                type="file"
+                multiple
+                accept=".pdf,.docx,.txt,.rtf"
+                onChange={handleFileSelect}
+                className="hidden"
+                id="mobile-file-upload"
+              />
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {filteredDocuments.map((doc) => (
+                <div
+                  key={doc.id}
+                  className="bg-white rounded-xl p-4 border border-gray-200 shadow-sm hover:shadow-md transition-all duration-200"
+                >
+                  <div className="flex items-center space-x-3 mb-3">
+                    <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
+                      <FileText className="w-5 h-5 text-blue-600" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h4 className="font-medium text-gray-900 truncate">{doc.name}</h4>
+                      <p className="text-sm text-gray-500">{formatFileSize(doc.size)}</p>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      {doc.status === "completed" && <CheckCircle className="w-5 h-5 text-green-500" />}
+                      {doc.status === "processing" && <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />}
+                      {doc.status === "error" && <AlertCircle className="w-5 h-5 text-red-500" />}
+                    </div>
+                  </div>
+                  
+                  {doc.status !== "completed" && (
+                    <div className="space-y-2 mb-3">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">{doc.statusMessage || "Processing..."}</span>
+                        <span className="font-medium text-gray-700">{Math.round(doc.progress)}%</span>
+                      </div>
+                      <Progress value={Math.round(doc.progress)} className="h-2" />
+                    </div>
+                  )}
+
+                  {doc.status === "completed" && doc.themes && (
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      {doc.themes.slice(0, 2).map((theme, index) => (
+                        <Badge key={index} variant="secondary" className="text-xs">
+                          {theme}
+                        </Badge>
+                      ))}
+                      {doc.themes.length > 2 && (
+                        <Badge variant="outline" className="text-xs">
+                          +{doc.themes.length - 2}
+                        </Badge>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-gray-500">{doc.uploadDate}</span>
+                    <div className="flex items-center space-x-2">
+                      <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
+                        <Eye className="w-4 h-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 w-8 p-0 text-red-500 hover:text-red-700 hover:bg-red-50"
+                        onClick={() => handleDeleteDocument(doc.id)}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Mobile Floating Action Button */}
+        <div className="fixed bottom-6 right-6 z-50">
+          <Button
+            onClick={() => document.getElementById("mobile-file-upload")?.click()}
+            className="w-14 h-14 rounded-full bg-blue-500 hover:bg-blue-600 text-white shadow-lg hover:shadow-xl transition-all duration-300"
+          >
+            <Plus className="w-6 h-6" />
+          </Button>
+        </div>
+
+        {/* Mobile Menu Overlay */}
+        {!sidebarCollapsed && (
+          <div className="fixed inset-0 z-40 bg-black/20 backdrop-blur-sm" onClick={() => setSidebarCollapsed(true)}>
+            <div className="absolute left-0 top-0 bottom-0 w-80 bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+              <div className="p-4 border-b border-gray-200">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-semibold text-gray-800">Menu</h2>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setSidebarCollapsed(true)}
+                  >
+                    <X className="h-5 w-5" />
+                  </Button>
+                </div>
+              </div>
+              
+              <div className="p-4 space-y-4">
+                <div>
+                  <h3 className="text-sm font-medium text-gray-600 mb-3">Quick Actions</h3>
+                  <div className="space-y-2">
+                    <Button
+                      variant="ghost"
+                      className="w-full justify-start text-sm"
+                      onClick={() => document.getElementById("mobile-file-upload")?.click()}
+                    >
+                      <Upload className="w-4 h-4 mr-3" />
+                      Upload Documents
+                    </Button>
+                    <Link href="/vault">
+                      <Button variant="ghost" className="w-full justify-start text-sm">
+                        <Home className="w-4 h-4 mr-3" />
+                        Back to Vault
+                      </Button>
+                    </Link>
+                    <Button 
+                      onClick={logout}
+                      variant="ghost" 
+                      className="w-full justify-start text-sm text-red-600 hover:text-red-700 hover:bg-red-50"
+                    >
+                      <LogOut className="w-4 h-4 mr-3" />
+                      Logout
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="pt-4 border-t border-gray-200">
+                  <div className="bg-gray-50 rounded-lg p-3">
+                    <h4 className="text-sm font-medium text-gray-700 mb-2">Statistics</h4>
+                    <div className="space-y-1 text-xs text-gray-600">
+                      <div className="flex justify-between">
+                        <span>Total:</span>
+                        <span>{stats.total}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Processed:</span>
+                        <span>{stats.completed}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Size:</span>
+                        <span>{formatFileSize(stats.totalSize)}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Desktop: Keep original layout */}
+      <div className="hidden md:flex h-[calc(100vh-80px)]">
         {/* Enhanced Sidebar */}
         <div className={`${sidebarCollapsed ? 'w-16' : 'w-80'} bg-white/90 backdrop-blur-xl border-r border-gray-200/50 transition-all duration-300 flex flex-col`}>
           {/* Logo Section */}
-          <div className="p-4 border-b border-gray-200/50">
+          <div className="p-3 border-b border-gray-200/50">
             {!sidebarCollapsed && (
-              <div className="w-full h-12">
-                <SixthvaultLogo size="full" />
+              <div className="w-full h-16 flex items-center justify-center">
+                <div className="max-w-full max-h-full">
+                  <SixthvaultLogo size="large" />
+                </div>
               </div>
             )}
             {sidebarCollapsed && (
-              <div className="w-8 h-8 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-lg flex items-center justify-center">
-                <Shield className="w-4 h-4 text-white" />
+              <div className="flex justify-center">
+                <div className="w-8 h-8 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-lg flex items-center justify-center">
+                  <Shield className="w-4 h-4 text-white" />
+                </div>
               </div>
             )}
           </div>
@@ -2512,20 +3155,20 @@ function DocumentsPageContent() {
                             </div>
 
                             {doc.status !== "completed" && (
-                              <div className="space-y-2">
-                                <div className="flex justify-between text-sm">
-                                  <span className="text-gray-600">
-                                    {doc.statusMessage || "Processing..."}
-                                  </span>
-                                  <span className="font-medium text-gray-700">{doc.progress}%</span>
-                                </div>
-                                <Progress value={doc.progress} className="h-2" />
-                                {doc.processingStage && (
-                                  <div className="text-xs text-blue-600 font-medium">
-                                    Stage: {doc.processingStage}
+                                <div className="space-y-2">
+                                  <div className="flex justify-between text-sm">
+                                    <span className="text-gray-600">
+                                      {doc.statusMessage || "Processing..."}
+                                    </span>
+                                    <span className="font-medium text-gray-700">{Math.round(doc.progress)}%</span>
                                   </div>
-                                )}
-                              </div>
+                                  <Progress value={Math.round(doc.progress)} className="h-2" />
+                                  {doc.processingStage && (
+                                    <div className="text-xs text-blue-600 font-medium">
+                                      Stage: {doc.processingStage}
+                                    </div>
+                                  )}
+                                </div>
                             )}
 
                             {doc.status === "error" && (

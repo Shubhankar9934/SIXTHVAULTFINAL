@@ -156,7 +156,7 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen bg-white flex items-center justify-center p-4 relative overflow-hidden">
+    <div className="min-h-screen bg-white flex items-center justify-center mobile-container relative overflow-hidden mobile-safe-top mobile-safe-bottom">
       {/* Beautiful flowing wave background */}
       <div className="absolute inset-0">
         <svg className="absolute inset-0 w-full h-full" viewBox="0 0 1440 800" preserveAspectRatio="xMidYMid slice">
@@ -223,230 +223,186 @@ export default function LoginPage() {
         </svg>
       </div>
 
-      <div className="w-full max-w-6xl grid lg:grid-cols-2 gap-8 items-center relative z-10">
-        {/* Left Side - Branding */}
-        <div className="hidden lg:block text-gray-900 space-y-8">
-          <div className="space-y-6">
-            <h1 className="text-5xl font-bold leading-tight bg-gradient-to-r from-purple-600 via-blue-600 to-cyan-500 bg-clip-text text-transparent">
-              Welcome back to SixthVault
-              <span className="bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent block text-2xl mt-2">
-                the future of document intelligence
-              </span>
-            </h1>
-          </div>
-
-          <div className="grid grid-cols-1 gap-4">
-            <div className="flex items-center space-x-4 p-4 bg-white/80 rounded-lg backdrop-blur-sm border border-gray-200 shadow-sm">
-              <div className="p-2 bg-blue-500/20 rounded-lg">
-                <Lock className="h-6 w-6 text-blue-600" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900">Bank-Grade Security</h3>
-                <p className="text-sm text-gray-600">End-to-end encryption and compliance</p>
-              </div>
-            </div>
-            <div className="flex items-center space-x-4 p-4 bg-white/80 rounded-lg backdrop-blur-sm border border-gray-200 shadow-sm">
-              <div className="p-2 bg-purple-500/20 rounded-lg">
-                <Building2 className="h-6 w-6 text-purple-600" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-gray-900">Scalable</h3>
-                <p className="text-sm text-gray-600">Join thousands of enterprises transforming their document workflows</p>
-              </div>
-            </div>
-          </div>
+      <div className="w-full max-w-md mx-auto relative z-10">
+        <div className="flex justify-center mb-8 lg:hidden">
+          <SixthvaultLogo size="large" />
         </div>
 
-        {/* Right Side - Login Form */}
-        <div className="w-full max-w-md mx-auto lg:mx-0">
-          <div className="text-center mb-8 lg:hidden">
-            <SixthvaultLogo size="large" />
-          </div>
-
-          <Card className="shadow-2xl bg-white/95 backdrop-blur-sm border-0">
-            <CardHeader className="space-y-4 pb-8">
-              <Link
-                href="/"
-                className="inline-flex items-center text-sm text-blue-600 hover:text-blue-500 transition-colors mb-2"
-              >
-                <ArrowLeft className="w-4 h-4 mr-1" />
-                Back to Home
-              </Link>
-              <div className="hidden lg:block text-center">
-                <SixthvaultLogo size="medium" />
+        <Card className="shadow-2xl bg-white/95 backdrop-blur-sm border-0 rounded-xl sm:rounded-2xl">
+          <CardHeader className="space-y-4 pb-6 sm:pb-8 px-4 sm:px-6">
+            <Link
+              href="/"
+              className="touch-target inline-flex items-center text-responsive-sm text-blue-600 hover:text-blue-500 transition-colors mb-2"
+            >
+              <ArrowLeft className="w-4 h-4 mr-1" />
+              Back to Home
+            </Link>
+            <div className="text-center">
+              <div className="hidden lg:flex lg:justify-center mb-2">
+                <SixthvaultLogo size="large" />
               </div>
-              <div className="text-center">
-                <CardTitle className="text-2xl font-bold text-slate-900">Sign In to Your Account</CardTitle>
-                <CardDescription className="text-slate-600 mt-2">
-                  Access your secure document vault
-                </CardDescription>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <form onSubmit={handleSubmit} className="space-y-5">
-                {error && (
-                  <Alert variant="destructive" className="border-red-200 bg-red-50">
-                    <AlertCircle className="h-4 w-4" />
-                    <AlertDescription className="text-red-800">{error}</AlertDescription>
-                  </Alert>
-                )}
+              <CardTitle className="text-responsive-xl font-bold text-slate-900">Sign In to Your Account</CardTitle>
+              <CardDescription className="text-responsive-sm text-slate-600 mt-2">
+                Access your secure document vault
+              </CardDescription>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4 sm:space-y-6 px-4 sm:px-6 pb-6 sm:pb-8">
+            <form onSubmit={handleSubmit} className="space-y-5">
+              {error && (
+                <Alert variant="destructive" className="border-red-200 bg-red-50">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription className="text-red-800">{error}</AlertDescription>
+                </Alert>
+              )}
 
-                {isUnverified && (
-                  <Alert className="border-blue-200 bg-blue-50">
-                    <AlertCircle className="h-4 w-4 text-blue-600" />
-                    <div className="flex flex-col space-y-2">
-                      <AlertDescription className="text-blue-800">
-                        Please verify your email to access your account.
-                      </AlertDescription>
-                      <Button 
-                        type="button"
-                        variant="outline"
-                        className="w-full border-blue-200 hover:bg-blue-100 text-blue-700"
-                        onClick={handleResendVerification}
-                        disabled={isLoading}
-                      >
-                        {isLoading ? (
-                          <>
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            Sending verification code...
-                          </>
-                        ) : (
-                          'Resend Verification Code'
-                        )}
-                      </Button>
-                    </div>
-                  </Alert>
-                )}
-
-                {resendSuccess && (
-                  <Alert className="border-green-200 bg-green-50">
-                    <CheckCircle className="h-4 w-4 text-green-600" />
-                    <AlertDescription className="text-green-800">
-                      Verification code sent! Please check your email.
+              {isUnverified && (
+                <Alert className="border-blue-200 bg-blue-50">
+                  <AlertCircle className="h-4 w-4 text-blue-600" />
+                  <div className="flex flex-col space-y-2">
+                    <AlertDescription className="text-blue-800">
+                      Please verify your email to access your account.
                     </AlertDescription>
-                  </Alert>
-                )}
-
-                <div className="space-y-2">
-                  <Label htmlFor="email" className="text-slate-700 font-medium">Email Address</Label>
-                  <div className="relative">
-                    <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-slate-400" />
-                    <Input
-                      id="email"
-                      type="email"
-                      placeholder="Enter your email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      required
-                      disabled={isLoading}
-                      className="pl-10 h-12 border-slate-200 focus:border-blue-500 focus:ring-blue-500"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="password" className="text-slate-700 font-medium">Password</Label>
-                  <div className="relative">
-                    <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-slate-400" />
-                    <Input
-                      id="password"
-                      type={showPassword ? "text" : "password"}
-                      placeholder="Enter your password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      required
-                      disabled={isLoading}
-                      className="pl-10 pr-12 h-12 border-slate-200 focus:border-blue-500 focus:ring-blue-500"
-                    />
-                    <Button
+                    <Button 
                       type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="absolute right-0 top-0 h-full px-3 py-2 hover:bg-transparent"
-                      onClick={() => setShowPassword(!showPassword)}
+                      variant="outline"
+                      className="w-full border-blue-200 hover:bg-blue-100 text-blue-700"
+                      onClick={handleResendVerification}
                       disabled={isLoading}
                     >
-                      {showPassword ? (
-                        <EyeOff className="h-5 w-5 text-slate-400" />
+                      {isLoading ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Sending verification code...
+                        </>
                       ) : (
-                        <Eye className="h-5 w-5 text-slate-400" />
+                        'Resend Verification Code'
                       )}
                     </Button>
                   </div>
-                </div>
+                </Alert>
+              )}
 
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2">
-                    <input
-                      id="remember"
-                      type="checkbox"
-                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-slate-300 rounded"
-                    />
-                    <Label htmlFor="remember" className="text-sm text-slate-600">
-                      Remember me
-                    </Label>
-                  </div>
-                  <Link 
-                    href="/forgot-password" 
-                    className="text-sm text-blue-600 hover:text-blue-500 font-medium transition-colors"
-                  >
-                    Forgot password?
-                  </Link>
-                </div>
+              {resendSuccess && (
+                <Alert className="border-green-200 bg-green-50">
+                  <CheckCircle className="h-4 w-4 text-green-600" />
+                  <AlertDescription className="text-green-800">
+                    Verification code sent! Please check your email.
+                  </AlertDescription>
+                </Alert>
+              )}
 
-                <Button 
-                  type="submit" 
-                  className="w-full h-12 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white font-semibold shadow-lg transition-all duration-200 transform hover:scale-[1.02]"
-                  disabled={isLoading}
-                >
-                  {isLoading ? (
-                    <>
-                      <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                      {isAuthenticated ? 'Redirecting to Vault...' : 'Signing in...'}
-                    </>
-                  ) : (
-                    <>
-                      Sign In
-                      <ArrowRight className="ml-2 h-5 w-5" />
-                    </>
-                  )}
-                </Button>
-              </form>
-
-              <div className="relative">
-                <div className="absolute inset-0 flex items-center">
-                  <span className="w-full border-t border-slate-200" />
-                </div>
-                <div className="relative flex justify-center text-xs uppercase">
-                  <span className="bg-white px-2 text-slate-500">New to SixthVault?</span>
+              <div className="space-y-2">
+                <Label htmlFor="email" className="text-slate-700 font-medium text-responsive-sm">Email Address</Label>
+                <div className="relative">
+                  <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-slate-400" />
+                  <Input
+                    id="email"
+                    type="email"
+                    placeholder="Enter your email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    disabled={isLoading}
+                    className="pl-10 h-12 sm:h-14 border-slate-200 focus:border-blue-500 focus:ring-blue-500 text-responsive-base rounded-lg"
+                    autoComplete="email"
+                    inputMode="email"
+                  />
                 </div>
               </div>
 
-              <div className="text-center">
+              <div className="space-y-2">
+                <Label htmlFor="password" className="text-slate-700 font-medium text-responsive-sm">Password</Label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-slate-400" />
+                  <Input
+                    id="password"
+                    type={showPassword ? "text" : "password"}
+                    placeholder="Enter your password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    disabled={isLoading}
+                    className="pl-10 pr-12 h-12 sm:h-14 border-slate-200 focus:border-blue-500 focus:ring-blue-500 text-responsive-base rounded-lg"
+                    autoComplete="current-password"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="touch-target absolute right-0 top-0 h-full px-3 py-2 hover:bg-transparent"
+                    onClick={() => setShowPassword(!showPassword)}
+                    disabled={isLoading}
+                  >
+                    {showPassword ? (
+                      <EyeOff className="h-5 w-5 text-slate-400" />
+                    ) : (
+                      <Eye className="h-5 w-5 text-slate-400" />
+                    )}
+                  </Button>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-3 sm:space-y-0">
+                <div className="flex items-center space-x-2">
+                  <input
+                    id="remember"
+                    type="checkbox"
+                    className="h-5 w-5 sm:h-4 sm:w-4 text-blue-600 focus:ring-blue-500 border-slate-300 rounded"
+                  />
+                  <Label htmlFor="remember" className="text-responsive-sm text-slate-600">
+                    Remember me
+                  </Label>
+                </div>
                 <Link 
-                  href="/register" 
-                  className="inline-flex items-center justify-center w-full h-12 px-4 py-2 border border-slate-300 rounded-md shadow-sm bg-white text-slate-700 hover:bg-slate-50 font-medium transition-colors"
+                  href="/forgot-password" 
+                  className="touch-target text-responsive-sm text-blue-600 hover:text-blue-500 font-medium transition-colors"
                 >
-                  Create Enterprise Account
-                  <ArrowRight className="ml-2 h-4 w-4" />
+                  Forgot password?
                 </Link>
               </div>
 
-            </CardContent>
-          </Card>
+              <Button 
+                type="submit" 
+                className="touch-target w-full h-12 sm:h-14 bg-gray-100 hover:bg-gray-200 text-gray-800 font-semibold shadow-sm border border-gray-300 transition-all duration-200 text-responsive-base rounded-lg"
+                disabled={isLoading}
+              >
+                {isLoading ? (
+                  <>
+                    <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                    {isAuthenticated ? 'Redirecting to Vault...' : 'Signing in...'}
+                  </>
+                ) : (
+                  <>
+                    Sign In
+                    <ArrowRight className="ml-2 h-5 w-5" />
+                  </>
+                )}
+              </Button>
+            </form>
 
-          {/* Trust Indicators */}
-          <div className="mt-8 text-center">
-            <p className="text-sm text-gray-600 mb-4">Trusted by enterprises worldwide</p>
-            <div className="flex items-center justify-center space-x-6 opacity-80">
-              <div className="text-xs text-gray-500">SOC 2 Compliant</div>
-              <div className="w-1 h-1 bg-gray-400 rounded-full"></div>
-              <div className="text-xs text-gray-500">GDPR Ready</div>
-              <div className="w-1 h-1 bg-gray-400 rounded-full"></div>
-              <div className="text-xs text-gray-500">ISO 27001</div>
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t border-slate-200" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-white px-2 text-slate-500">New to SixthVault?</span>
+              </div>
             </div>
-          </div>
-        </div>
+
+            <div className="text-center">
+              <Link 
+                href="/register" 
+                className="inline-flex items-center justify-center w-full h-12 px-4 py-2 border border-slate-300 rounded-md shadow-sm bg-white text-slate-700 hover:bg-slate-50 font-medium transition-colors"
+              >
+                Create Enterprise Account
+                <ArrowRight className="ml-2 h-4 w-4" />
+              </Link>
+            </div>
+
+          </CardContent>
+        </Card>
+
       </div>
     </div>
   )

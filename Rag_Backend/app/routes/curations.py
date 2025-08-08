@@ -17,7 +17,7 @@ from app.models import Document
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/curations", tags=["curations"])
+router = APIRouter(prefix="/curations", tags=["curations"], redirect_slashes=False)
 
 # Request/Response Models
 class CurationSettingsRequest(BaseModel):
@@ -73,7 +73,7 @@ class CurationGenerationResponse(BaseModel):
     curations: List[CurationResponse]
     stats: Dict
 
-@router.get("/", response_model=List[CurationResponse])
+@router.get("", response_model=List[CurationResponse])
 async def get_user_curations(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
@@ -185,6 +185,9 @@ async def delete_curation(
     session: Session = Depends(get_session)
 ):
     """Delete a specific curation"""
+    # Store user_id early to avoid session issues in error handling
+    user_id = str(user.id)
+    
     try:
         from sqlmodel import select
         from app.models import AICuration, DocumentCurationMapping
@@ -194,7 +197,7 @@ async def delete_curation(
         statement = select(AICuration).where(
             and_(
                 AICuration.id == curation_id,
-                AICuration.owner_id == str(user.id)
+                AICuration.owner_id == user_id
             )
         )
         curation = session.exec(statement).first()
@@ -202,32 +205,43 @@ async def delete_curation(
         if not curation:
             raise HTTPException(status_code=404, detail="Curation not found")
         
-        # Delete associated mappings
+        # Store curation title for response
+        curation_title = curation.title
+        
+        # Delete associated mappings first (to avoid foreign key constraint)
         mapping_statement = select(DocumentCurationMapping).where(
             and_(
                 DocumentCurationMapping.curation_id == curation_id,
-                DocumentCurationMapping.owner_id == str(user.id)
+                DocumentCurationMapping.owner_id == user_id
             )
         )
         mappings = session.exec(mapping_statement).all()
         
+        # Delete mappings first
         for mapping in mappings:
             session.delete(mapping)
         
-        # Delete the curation
+        # Flush to ensure mappings are deleted before deleting curation
+        session.flush()
+        
+        # Now delete the curation
         session.delete(curation)
         session.commit()
         
+        logger.info(f"Successfully deleted curation {curation_id} and {len(mappings)} mappings for user {user_id}")
+        
         return {
             "success": True,
-            "message": f"Curation '{curation.title}' deleted successfully",
+            "message": f"Curation '{curation_title}' deleted successfully",
             "deletedMappings": len(mappings)
         }
         
     except HTTPException:
+        session.rollback()
         raise
     except Exception as e:
-        logger.error(f"Failed to delete curation {curation_id} for user {user.id}: {e}")
+        session.rollback()
+        logger.error(f"Failed to delete curation {curation_id} for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete curation: {str(e)}")
 
 @router.get("/{curation_id}")
@@ -372,6 +386,68 @@ async def handle_document_added(
             "message": f"Failed to handle document addition: {str(e)}"
         }
 
+@router.get("/{curation_id}/content")
+async def get_curation_content(
+    curation_id: str,
+    provider: str = "gemini",
+    model: str = "gemini-1.5-flash",
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """Get stored content for a specific curation or generate if not exists"""
+    try:
+        from sqlmodel import select
+        from app.models import AICuration
+        from sqlalchemy import and_
+        
+        # First, try to get existing content from database
+        statement = select(AICuration).where(
+            and_(
+                AICuration.id == curation_id,
+                AICuration.owner_id == str(user.id)
+            )
+        )
+        curation = session.exec(statement).first()
+        
+        if not curation:
+            raise HTTPException(status_code=404, detail="Curation not found")
+        
+        # If content already exists and is generated, return it instantly
+        if curation.content and curation.content_generated:
+            logger.info(f"Returning stored content for curation {curation_id}")
+            return {
+                "success": True,
+                "content": curation.content,
+                "message": "Content retrieved from database",
+                "cached": True
+            }
+        
+        # If no content exists, generate it and save to database
+        logger.info(f"No stored content found for curation {curation_id}, generating new content")
+        result = await curation_service.generate_curation_content(
+            curation_id,
+            str(user.id),
+            session,
+            provider=provider,
+            model=model
+        )
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "content": result["content"],
+                "message": result["message"],
+                "cached": False
+            }
+        else:
+            raise HTTPException(status_code=400, detail=result["message"])
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get curation content {curation_id} for user {user.id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get curation content: {str(e)}")
+
 @router.post("/custom", response_model=CurationResponse)
 async def create_custom_curation(
     request: CustomCurationRequest,
@@ -394,6 +470,18 @@ async def create_custom_curation(
         )
         
         if result["success"]:
+            # Automatically generate content for the new curation
+            content_result = await curation_service.generate_curation_content(
+                result["curation"]["id"],
+                str(user.id),
+                session,
+                provider=request.provider,
+                model=request.model
+            )
+            
+            if content_result["success"]:
+                logger.info(f"Generated content for new custom curation {result['curation']['id']}")
+            
             return result["curation"]
         else:
             raise HTTPException(status_code=400, detail=result["message"])

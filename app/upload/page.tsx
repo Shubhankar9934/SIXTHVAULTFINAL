@@ -11,6 +11,7 @@ import { Upload, FileText, X, CheckCircle, AlertCircle, Loader2 } from "lucide-r
 import Link from "next/link"
 import SixthvaultLogo from "@/components/SixthvaultLogo"
 import { ragApiClient, type UploadResponse, type WebSocketMessage } from "@/lib/api-client"
+import { documentStore, type ProcessingDocument } from "@/lib/document-store"
 import { RouteGuard } from "@/components/route-guard"
 import { useAuth } from "@/lib/auth-context"
 
@@ -24,6 +25,8 @@ interface UploadedFile {
   language?: string
   themes?: string[]
   demographics?: string[]
+  processingOrder?: number // For sequential progress tracking
+  batchId?: string
 }
 
 function UploadPageContent() {
@@ -31,6 +34,21 @@ function UploadPageContent() {
   const [files, setFiles] = useState<UploadedFile[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const [totalProgress, setTotalProgress] = useState(0)
+  const [processingDocuments, setProcessingDocuments] = useState<ProcessingDocument[]>([])
+
+  // Initialize background processing and subscribe to updates
+  useEffect(() => {
+    // Initialize background processing and load documents
+    documentStore.initializeBackgroundProcessing();
+    documentStore.getDocuments();
+    
+    // Subscribe to processing updates
+    const unsubscribe = documentStore.subscribeToProcessingUpdates(setProcessingDocuments);
+    
+    return () => {
+      unsubscribe();
+    };
+  }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -57,160 +75,543 @@ function UploadPageContent() {
   }
 
   const processFiles = async (fileList: File[]) => {
-    const newFiles: UploadedFile[] = fileList.map((file) => ({
+    // FIXED: Proper sequential processing with immediate UI visibility
+    console.log('🔄 STARTING SEQUENTIAL BULK UPLOAD for', fileList.length, 'files')
+    
+    // First, add ALL files to UI immediately so user can see them
+    const tempFiles: UploadedFile[] = fileList.map((file, index) => ({
+      id: `temp_${index}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      status: "uploading",
+      progress: 0,
+      processingOrder: index,
+    }))
+    
+    // Add all files to UI at once so user sees the full queue
+    setFiles((prev) => [...prev, ...tempFiles])
+    
+    // Now process files sequentially, but update existing UI entries
+    for (let i = 0; i < fileList.length; i++) {
+      const file = fileList[i]
+      const tempFile = tempFiles[i]
+      
+      console.log(`📁 Processing file ${i + 1}/${fileList.length}: ${file.name}`)
+      
+      try {
+        await processFileSequentially(file, tempFile.id, i + 1, fileList.length)
+        console.log(`✅ File ${i + 1}/${fileList.length} completed: ${file.name}`)
+      } catch (error) {
+        console.error(`❌ File ${i + 1}/${fileList.length} failed: ${file.name}`, error)
+        // Mark as error but continue with next file
+        setFiles((prev) => 
+          prev.map((f) => 
+            f.id === tempFile.id
+              ? { ...f, status: "error", progress: 0 }
+              : f
+          )
+        )
+      }
+      
+      // Brief pause between files for better UX
+      if (i < fileList.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 800))
+      }
+    }
+    
+    console.log('✅ All files processed sequentially')
+  }
+
+  // FIXED: New sequential processing function that updates existing UI entries
+  const processFileSequentially = async (file: File, tempFileId: string, currentFile: number, totalFiles: number) => {
+    return new Promise<void>(async (resolve, reject) => {
+      try {
+        console.log(`📤 Starting upload for file ${currentFile}/${totalFiles}: ${file.name}`)
+        
+        // Update status to uploading
+        setFiles((prev) => 
+          prev.map((f) => 
+            f.id === tempFileId 
+              ? { ...f, status: "uploading", progress: 5 }
+              : f
+          )
+        )
+        
+        // Upload single file
+        const uploadResponse = await ragApiClient.uploadFiles([file])
+        const batchId = uploadResponse.batch_id
+        
+        console.log(`✅ Upload initiated for ${file.name}, batch ID: ${batchId}`)
+
+        // Update to processing status
+        setFiles((prev) => 
+          prev.map((f) => 
+            f.id === tempFileId 
+              ? { 
+                  ...f, 
+                  status: "processing", 
+                  progress: 15,
+                  batchId: batchId
+                }
+              : f
+          )
+        )
+
+        // Add to document store for background processing
+        const processingDoc: ProcessingDocument = {
+          id: tempFileId,
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          status: "processing",
+          progress: 15,
+          uploadDate: new Date().toISOString().split("T")[0],
+          batchId: batchId,
+          processingOrder: currentFile - 1,
+          statusMessage: `Processing file ${currentFile}/${totalFiles}...`
+        }
+        
+        documentStore.addProcessingDocument(processingDoc)
+        console.log('📝 Added processing document to store:', processingDoc.name)
+
+        // CRITICAL FIX: Start background processing for this batch
+        const backgroundCleanup1 = documentStore.startBackgroundProcessing(batchId, [processingDoc])
+        console.log('🔄 Started background processing for batch:', batchId)
+        
+        // Store cleanup function for later use
+        ;(window as any)[`backgroundCleanup_${batchId}`] = backgroundCleanup1
+
+        // Set up completion tracking
+        let isCompleted = false
+        let progressUpdateInterval: NodeJS.Timeout | null = null
+        let completionTimeout: NodeJS.Timeout
+        
+        const completeFile = () => {
+          if (!isCompleted) {
+            isCompleted = true
+            if (progressUpdateInterval) clearInterval(progressUpdateInterval)
+            clearTimeout(completionTimeout)
+            console.log(`🎯 File completion confirmed: ${file.name}`)
+            resolve()
+          }
+        }
+
+        // Start gradual progress updates for better UX
+        progressUpdateInterval = setInterval(() => {
+          if (!isCompleted) {
+            setFiles((prev) => 
+              prev.map((f) => {
+                if (f.id === tempFileId && f.status === "processing" && f.progress < 85) {
+                  return { 
+                    ...f, 
+                    progress: Math.min(f.progress + 3, 85) // Gradually increase to 85%
+                  }
+                }
+                return f
+              })
+            )
+          }
+        }, 2000) // Update every 2 seconds
+
+        // Create WebSocket connection for real-time updates
+        const reliableWS = ragApiClient.createReliableWebSocket(batchId, (message: any) => {
+          try {
+            console.log(`📨 WebSocket message for ${file.name}:`, message.type, message.data)
+
+            switch (message.type) {
+              case 'processing':
+                setFiles((prev) => 
+                  prev.map((f) => {
+                    if (f.id === tempFileId) {
+                      // Ensure progress never decreases and is synced with percentage display
+                      const newProgress = Math.max(f.progress, message.data?.progress || 30)
+                      return { 
+                        ...f, 
+                        progress: Math.min(newProgress, 90)
+                      }
+                    }
+                    return f
+                  })
+                )
+                break
+
+              case 'completed':
+              case 'file_processing_completed':
+                console.log(`🎉 File processing completed: ${file.name}`)
+                
+                // Clear progress interval
+                if (progressUpdateInterval) {
+                  clearInterval(progressUpdateInterval)
+                  progressUpdateInterval = null
+                }
+                
+                // Update to completed state with AI data
+                setFiles((prev) => 
+                  prev.map((f) => {
+                    if (f.id === tempFileId) {
+                      const completedData = message.data || {}
+                      return {
+                        ...f,
+                        status: "completed" as const,
+                        progress: 100, // Always 100% when completed
+                        language: completedData.language || "English",
+                        themes: completedData.themes || ["Document Analysis"],
+                        demographics: completedData.demographics || []
+                      }
+                    }
+                    return f
+                  })
+                )
+                
+                // Update processing document in store
+                documentStore.updateProcessingDocument(tempFileId, {
+                  status: 'completed',
+                  progress: 100,
+                  summary: message.data?.summary,
+                  themes: message.data?.themes,
+                  keywords: message.data?.keywords || message.data?.themes,
+                  demographics: message.data?.demographics,
+                  keyInsights: message.data?.insights ? [message.data.insights] : undefined,
+                  language: message.data?.language || 'English',
+                  statusMessage: 'Processing completed successfully!'
+                })
+                
+                // Complete this file
+                setTimeout(completeFile, 500) // Small delay to show 100% completion
+                break
+
+              case 'error':
+                console.error(`❌ Processing error for ${file.name}:`, message.data)
+                
+                // Clear progress interval
+                if (progressUpdateInterval) {
+                  clearInterval(progressUpdateInterval)
+                  progressUpdateInterval = null
+                }
+                
+                setFiles((prev) => 
+                  prev.map((f) => {
+                    if (f.id === tempFileId) {
+                      return { 
+                        ...f, 
+                        status: "error", 
+                        progress: 0
+                      }
+                    }
+                    return f
+                  })
+                )
+                reject(new Error(message.data?.error || 'Processing failed'))
+                break
+
+              default:
+                // Handle other progress updates with sync
+                if (message.data?.progress && typeof message.data.progress === 'number') {
+                  setFiles((prev) => 
+                    prev.map((f) => {
+                      if (f.id === tempFileId) {
+                        // Ensure progress bar and percentage are always synced
+                        const syncedProgress = Math.max(f.progress, Math.min(message.data.progress, 90))
+                        return { 
+                          ...f, 
+                          progress: syncedProgress
+                        }
+                      }
+                      return f
+                    })
+                  )
+                }
+                break
+            }
+          } catch (error) {
+            console.error(`❌ Error handling WebSocket message for ${file.name}:`, error)
+          }
+        })
+
+        // Start WebSocket connection
+        await reliableWS.connect()
+        
+        // Note: Background processing already started above, no need to duplicate
+        
+        // Set up timeout for completion (8 minutes for large files)
+        completionTimeout = setTimeout(() => {
+          if (!isCompleted) {
+            console.warn(`⏱️ Timeout waiting for completion of ${file.name}`)
+            
+            // Clear progress interval
+            if (progressUpdateInterval) {
+              clearInterval(progressUpdateInterval)
+              progressUpdateInterval = null
+            }
+            
+            reliableWS.disconnect()
+            
+            // Mark as completed to prevent hanging
+            setFiles((prev) => 
+              prev.map((f) => {
+                if (f.id === tempFileId) {
+                  return { 
+                    ...f, 
+                    status: "completed", 
+                    progress: 100,
+                    language: 'English'
+                  }
+                }
+                return f
+              })
+            )
+            
+            completeFile()
+          }
+        }, 480000) // 8 minutes timeout for large files
+
+        // Cleanup function
+        const cleanup = () => {
+          if (progressUpdateInterval) {
+            clearInterval(progressUpdateInterval)
+            progressUpdateInterval = null
+          }
+          reliableWS.disconnect()
+          clearTimeout(completionTimeout)
+        }
+
+        // Store cleanup function
+        ;(window as any)[`cleanup_${batchId}`] = cleanup
+
+      } catch (error) {
+        console.error(`❌ Upload failed for ${file.name}:`, error)
+        
+        // Update to error state
+        setFiles((prev) => 
+          prev.map((f) => 
+            f.id === tempFileId
+              ? { ...f, status: "error", progress: 0 }
+              : f
+          )
+        )
+        
+        reject(error)
+      }
+    })
+  }
+
+  const processFilesSequentially = async (fileList: File[], currentFile: number, totalFiles: number) => {
+    const file = fileList[0] // Only one file at a time
+
+    // Create temporary file for UI with unique ID
+    const tempFile: UploadedFile = {
       id: Math.random().toString(36).substr(2, 9),
       name: file.name,
       size: file.size,
       type: file.type,
       status: "uploading",
       progress: 0,
-    }))
+      processingOrder: currentFile - 1, // Track processing order
+    }
 
-    setFiles((prev) => [...prev, ...newFiles])
+    setFiles((prev) => [...prev, tempFile])
 
     try {
-      // Upload files to RAG backend - Ollama Only
+      console.log(`📤 Uploading file ${currentFile}/${totalFiles}: ${file.name}`)
+      
       const uploadResponse = await ragApiClient.uploadFiles(fileList)
       console.log('Upload response:', uploadResponse)
+      const batchId = uploadResponse.batch_id
 
-      // Update files to processing status
-      setFiles((prev) => prev.map((f) => ({ ...f, status: "processing", progress: 0 })))
+      // Update file to processing status
+      setFiles((prev) => 
+        prev.map((f) => {
+          if (f.id === tempFile.id) {
+            return { 
+              ...f, 
+              status: "processing", 
+              progress: 10,
+              batchId: batchId
+            }
+          }
+          return f
+        })
+      )
 
-      // Connect to WebSocket for progress updates
-      const ws = ragApiClient.connectWebSocket(uploadResponse.batch_id)
+      // Sequential Progress Management System for Single File
+      let isCleanedUp = false
+      let progressInterval: NodeJS.Timeout | null = null
+      let batchProgressTracker = {
+        totalFiles: 1, // Single file processing
+        completedFiles: 0,
+        currentProcessingFile: 0,
+        isSequentialProcessing: true,
+        baseProgressPerFile: 90, // Full 90% for this single file
+        priorityFileCompleted: false
+      }
       
-      ws.onmessage = (event) => {
+      // Sequential Progress Calculator
+      const calculateSequentialProgress = (fileIndex: number, stage: string): number => {
+        const baseProgress = batchProgressTracker.baseProgressPerFile * fileIndex
+        let stageProgress = 0
+        
+        // Define stage progress within each file's allocation
+        switch (stage) {
+          case 'uploading':
+            stageProgress = 0.1 * batchProgressTracker.baseProgressPerFile
+            break
+          case 'processing_started':
+            stageProgress = 0.2 * batchProgressTracker.baseProgressPerFile
+            break
+          case 'processing':
+            stageProgress = 0.6 * batchProgressTracker.baseProgressPerFile
+            break
+          case 'completing':
+            stageProgress = 0.9 * batchProgressTracker.baseProgressPerFile
+            break
+          case 'completed':
+            stageProgress = batchProgressTracker.baseProgressPerFile
+            break
+        }
+        
+        return Math.min(baseProgress + stageProgress, 90)
+      }
+
+      // Create reliable WebSocket connection with deduplication
+      const reliableWS = ragApiClient.createReliableWebSocket(batchId, (message: any) => {
         try {
-          const message: WebSocketMessage = JSON.parse(event.data)
-          console.log('WebSocket message:', message)
+          console.log('Sequential WebSocket message:', message)
 
           switch (message.type) {
             case 'queued':
-              setFiles((prev) => prev.map((f) => ({ ...f, status: "processing", progress: 10 })))
+              setFiles((prev) => prev.map((f) => 
+                f.batchId === batchId ? { ...f, status: "processing", progress: Math.max(f.progress, 10) } : f
+              ))
               break
+
             case 'processing':
-              setFiles((prev) => prev.map((f) => ({ ...f, progress: 50 })))
+              // Update progress based on sequential order
+              setFiles((prev) => prev.map((f) => {
+                if (f.batchId === batchId && f.status === "processing") {
+                  const currentProgress = calculateSequentialProgress(f.processingOrder || 0, 'processing')
+                  return { ...f, progress: Math.max(f.progress, Math.min(currentProgress, 90)) }
+                }
+                return f
+              }))
               break
-              
-            // Enhanced bulk processing events
-            case 'bulk_upload_started':
-              setFiles((prev) => prev.map((f) => ({ 
-                ...f, 
-                status: "processing", 
-                progress: 5 
-              })))
-              break
-              
-            case 'tier1_initiated':
-              // Priority file processing started
-              setFiles((prev) => prev.map((f, index) => 
-                index === 0 ? { ...f, status: "processing", progress: 15 } : f
-              ))
-              break
-              
-            case 'priority_processing_started':
-              setFiles((prev) => prev.map((f, index) => 
-                index === 0 ? { ...f, status: "processing", progress: 25 } : f
-              ))
-              break
-              
-            case 'rag_available':
-              // RAG is now available - first file completed
-              setFiles((prev) => prev.map((f, index) => 
-                index === 0 ? { 
-                  ...f, 
-                  status: "completed", 
-                  progress: 100,
-                  language: "English",
-                  themes: ["First Document - RAG Ready"],
-                  demographics: []
-                } : f
-              ))
-              break
-              
-            case 'tier2_initiated':
-              // Background processing started
-              setFiles((prev) => prev.map((f, index) => 
-                index > 0 ? { ...f, status: "processing", progress: 10 } : f
-              ))
-              break
-              
-            case 'background_processing_started':
-              // Individual background file started
-              if (message.data?.file_index) {
-                setFiles((prev) => prev.map((f, index) => 
-                  index === (message.data.file_index - 1) ? { ...f, progress: 30 } : f
-                ))
-              }
-              break
-              
-            case 'background_file_completed':
-              // Individual background file completed
-              if (message.data?.file_index) {
-                setFiles((prev) => prev.map((f, index) => 
-                  index === (message.data.file_index - 1) ? { 
+
+            case 'completed':
+              // CRITICAL FIX: Handle file completion with proper deduplication
+              if (message.data?.file || message.data?.filename) {
+                const messageFileName = message.data.file || message.data.filename
+                
+                setFiles((prev) => {
+                  // Find all matching files (both processing and potentially duplicated)
+                  const matchingFiles = prev.filter(f => 
+                    f.batchId === batchId && (
+                      f.name === messageFileName || 
+                      f.name.includes(messageFileName) || 
+                      messageFileName.includes(f.name)
+                    )
+                  )
+                  
+                  if (matchingFiles.length === 0) return prev
+                  
+                  // DEDUPLICATION: Keep only the first matching file, remove duplicates
+                  const primaryFile = matchingFiles[0]
+                  const duplicateIds = matchingFiles.slice(1).map(f => f.id)
+                  
+                  console.log('🔄 DEDUPLICATING FILES:', {
+                    filename: messageFileName,
+                    totalMatches: matchingFiles.length,
+                    primaryFileId: primaryFile.id,
+                    duplicatesToRemove: duplicateIds
+                  })
+                  
+                  // Remove duplicates and update the primary file
+                  const updatedFiles = prev
+                    .filter(f => !duplicateIds.includes(f.id)) // Remove duplicates
+                    .map((f) => {
+                      if (f.id === primaryFile.id) {
+                        const completedData = message.data
+                        
+                        return {
+                          ...f,
+                          status: "completed" as const,
+                          progress: 100,
+                          language: completedData?.language || "English",
+                          themes: completedData?.themes || ["Document Analysis"],
+                          demographics: completedData?.demographics || []
+                        }
+                      }
+                      return f
+                    })
+                  
+                  return updatedFiles
+                })
+              } else {
+                // Complete all files in batch
+                setFiles((prev) => prev.map((f) => 
+                  f.batchId === batchId ? { 
                     ...f, 
                     status: "completed", 
                     progress: 100,
-                    language: "English",
-                    themes: ["Document Analysis"],
-                    demographics: []
+                    language: message.data?.language || "English",
+                    themes: message.data?.themes || ["Document Analysis"],
+                    demographics: message.data?.demographics || []
                   } : f
                 ))
               }
-              break
               
-            case 'parallel_progress':
-              // Real-time parallel processing updates
-              setFiles((prev) => prev.map((f) => ({ 
-                ...f, 
-                progress: Math.max(f.progress, message.data?.overall_progress || 50)
-              })))
-              break
-              
-            case 'task_completed':
-              // Individual task completion (tagging, summary, etc.)
-              setFiles((prev) => prev.map((f) => ({ 
-                ...f, 
-                progress: Math.max(f.progress, 70)
-              })))
-              break
-              
-            case 'completed':
-              setFiles((prev) => prev.map((f) => ({ 
-                ...f, 
-                status: "completed", 
-                progress: 100,
-                language: message.data?.language || "English",
-                themes: message.data?.themes || ["Document Analysis"],
-                demographics: message.data?.demographics || []
-              })))
-              ws.close()
+              // Cleanup after completion
+              setTimeout(() => {
+                if (!isCleanedUp) {
+                  reliableWS.disconnect()
+                  isCleanedUp = true
+                }
+              }, 1000)
               break
               
             case 'error':
-            case 'priority_processing_error':
-            case 'background_processing_error':
-              setFiles((prev) => prev.map((f) => ({ ...f, status: "error", progress: 0 })))
-              ws.close()
+              setFiles((prev) => prev.map((f) => 
+                f.batchId === batchId ? { ...f, status: "error", progress: 0 } : f
+              ))
+              reliableWS.disconnect()
+              break
+
+            default:
+              // Handle other message types with progress updates
+              setFiles((prev) => prev.map((f) => {
+                if (f.batchId === batchId && f.status === "processing") {
+                  const newProgress = Math.max(f.progress, message.data?.progress || f.progress)
+                  return { ...f, progress: Math.min(newProgress, 90) }
+                }
+                return f
+              }))
               break
           }
         } catch (error) {
-          console.error('Error parsing WebSocket message:', error)
+          console.error('Error handling WebSocket message:', error)
         }
-      }
+      })
 
-      // Fallback: Close WebSocket after 5 minutes
+      // Start the connection
+      await reliableWS.connect()
+
+      // Auto cleanup after 10 minutes
       setTimeout(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.close()
+        if (!isCleanedUp) {
+          reliableWS.disconnect()
+          isCleanedUp = true
         }
-      }, 300000)
+      }, 600000)
 
     } catch (error) {
-      console.error('Upload error:', error)
-      // Mark all files as error
-      setFiles((prev) => prev.map((f) => ({ ...f, status: "error", progress: 0 })))
+      console.error('Upload failed:', error)
+      // Update temp file to error state
+      setFiles((prev) => 
+        prev.map((f) => 
+          f.id === tempFile.id
+            ? { ...f, status: "error", progress: 0 }
+            : f
+        )
+      )
     }
   }
 
@@ -358,7 +759,7 @@ function UploadPageContent() {
                               {file.status === "completed" && "Analysis Complete"}
                               {file.status === "error" && "Error occurred"}
                             </span>
-                            <span className="text-gray-600">{file.progress}%</span>
+                            <span className="text-gray-600">{Math.round(file.progress)}%</span>
                           </div>
                           <Progress value={file.progress} className="h-2" />
                         </div>

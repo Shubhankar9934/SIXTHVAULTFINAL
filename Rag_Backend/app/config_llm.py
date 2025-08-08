@@ -108,24 +108,6 @@ LLM_CONFIGS: Dict[str, Dict[str, LLMConfig]] = {
             recommended_for="Large contexts, coding tasks"
         ),
     },
-    "ollama": {
-        "llama3.2:latest": LLMConfig(
-            max_context_tokens=131072,  # 128K context window
-            max_response_tokens=8192,   # 8K response tokens
-            rate_limit_per_minute=0,    # No rate limits for local
-            cost_per_1k_tokens=0.0,     # Free local processing
-            supports_large_context=True,
-            recommended_for="Primary model for ALL tasks - summarization, tagging, demographics, AI insights, RAG generation, large document processing"
-        ),
-        "phi3:mini": LLMConfig(
-            max_context_tokens=4096,
-            max_response_tokens=2048,
-            rate_limit_per_minute=0,
-            cost_per_1k_tokens=0.0,
-            supports_large_context=False,
-            recommended_for="Fallback model for simple tasks when main model fails"
-        ),
-    }
 }
 
 class ContextStrategy:
@@ -135,22 +117,26 @@ class ContextStrategy:
     def get_optimal_provider_for_context(context_tokens: int, budget_conscious: bool = True) -> tuple[str, str]:
         """
         Get the optimal provider and model for a given context size
-        OPTIMIZED: Always prefer Ollama for all tasks
         
         Args:
             context_tokens: Number of tokens in the context
             budget_conscious: Whether to prioritize cost over performance
             
         Returns:
-            (provider, model) tuple - Always returns Ollama first
+            (provider, model) tuple
         """
-        # Always try Ollama first for all context sizes
-        if context_tokens <= 131072:  # Within Llama3.2 context window
-            return ("ollama", "llama3.2:latest")
+        # For small contexts, use Groq for speed
+        if context_tokens <= 8000:
+            return ("groq", "llama3-8b-8192")
+        # For medium contexts, use Groq with larger model
+        elif context_tokens <= 32000:
+            return ("groq", "mixtral-8x7b-32768")
+        # For large contexts, use Gemini
+        elif context_tokens <= 1000000:
+            return ("gemini", "gemini-1.5-flash")
+        # For very large contexts, use Gemini Pro
         else:
-            # For extremely large contexts, still try Ollama with chunking
-            # Other providers only as fallback for RAG purposes
-            return ("ollama", "llama3.2:latest")
+            return ("gemini", "gemini-1.5-pro")
     
     @staticmethod
     def get_chunking_strategy(context_tokens: int) -> Dict[str, Any]:
@@ -195,7 +181,6 @@ def get_available_providers() -> Dict[str, bool]:
         "groq": bool(settings.groq_api_key),
         "gemini": bool(settings.gemini_api_key),
         "deepseek": bool(settings.deepseek_api_key),
-        "ollama": True,  # Always available if Ollama is running locally
     }
 
 def get_recommended_settings(

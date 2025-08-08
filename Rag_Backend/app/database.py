@@ -94,7 +94,8 @@ def init_db():
         from app.models import (
             Document, ProcessingDocument, AICuration, CurationSettings,
             DocumentCurationMapping, CurationGenerationHistory, AISummary,
-            SummarySettings, DocumentSummaryMapping, SummaryGenerationHistory
+            SummarySettings, DocumentSummaryMapping, SummaryGenerationHistory,
+            Conversation, Message, ConversationSettings
         )
         
         # Create tables only if they don't exist (PostgreSQL handles IF NOT EXISTS automatically)
@@ -111,12 +112,16 @@ def reset_database():
         from app.models import (
             Document, ProcessingDocument, AICuration, CurationSettings,
             DocumentCurationMapping, CurationGenerationHistory, AISummary,
-            SummarySettings, DocumentSummaryMapping, SummaryGenerationHistory
+            SummarySettings, DocumentSummaryMapping, SummaryGenerationHistory,
+            Conversation, Message, ConversationSettings
         )
         
         # Drop all tables with CASCADE to handle foreign key constraints
         with engine.begin() as conn:
             # Drop all tables in reverse dependency order
+            conn.execute(text("DROP TABLE IF EXISTS conversation_settings CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS messages CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS conversations CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS summary_generation_history CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS document_summary_mapping CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS summary_settings CASCADE"))
@@ -130,6 +135,7 @@ def reset_database():
             conn.execute(text("DROP TABLE IF EXISTS document CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS users CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS temp_users CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS tenants CASCADE"))
         print("Dropped existing tables")
         
         # Create new tables

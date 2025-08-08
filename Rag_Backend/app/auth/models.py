@@ -53,6 +53,10 @@ class ForgotPasswordRequest(BaseModel):
 class ValidateResetTokenRequest(BaseModel):
     token: str
 
+class VerifyResetCodeRequest(BaseModel):
+    email: str
+    verification_code: str
+
 class ResetPasswordRequest(BaseModel):
     token: str
     password: str

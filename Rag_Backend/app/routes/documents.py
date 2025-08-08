@@ -7,6 +7,7 @@ from app.deps import get_current_user
 from app.database import User
 from app.utils import qdrant_store
 from app.services.processing_service import ProcessingService, ProcessingStatus
+from app.services.curation_service import CurationService
 from app.utils.s3_storage import cleanup_file_resources
 import os
 from pathlib import Path
@@ -216,7 +217,7 @@ async def delete_document(
     
     # Trigger curation update for document deletion
     try:
-        from app.services.curation_service import curation_service
+        curation_service = CurationService()
         await curation_service.handle_document_deletion(
             str(user.id), [document_id], session
         )

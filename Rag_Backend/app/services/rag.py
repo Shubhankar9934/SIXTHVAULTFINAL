@@ -85,7 +85,7 @@ class LightningRAGConfig:
     
     # Aggressive quality vs speed balance
     min_relevance_score: float = 0.2  # Lower threshold for speed
-    max_context_tokens: int = settings.ollama_num_ctx  # Use Ollama context limit
+    max_context_tokens: int = 8192  # Default context limit (was ollama_num_ctx)
     overlap_tokens: int = 100  # Reduced overlap
     
     # ABSOLUTELY NO TIMEOUTS - GUARANTEED OUTPUT AT ANY COST
@@ -95,7 +95,7 @@ class LightningRAGConfig:
     total_timeout: Optional[int] = None  # NO TOTAL TIMEOUT - Wait indefinitely
     
     # Provider optimization
-    preferred_provider: str = "ollama"  # Always prefer Ollama
+    preferred_provider: str = "bedrock"  # Always prefer Bedrock (was ollama)
     fallback_providers: List[str] = None
     
     def __post_init__(self):
@@ -332,8 +332,8 @@ class LightningReranker:
                 f"Return JSON array: [score1, score2, ...]"
             )
             
-            # Use Ollama for fast reranking
-            response = await smart_chat(prompt, preferred_provider="ollama")
+            # Use Bedrock for fast reranking
+            response = await smart_chat(prompt, preferred_provider="bedrock")
             scores = json.loads(response.strip())
             
             for hit, score in zip(candidates, scores):
@@ -558,7 +558,7 @@ class LightningQueryProcessor:
         try:
             # Single fast expansion attempt
             expanded = await asyncio.wait_for(
-                smart_chat(f"Rephrase briefly: {question}", preferred_provider="ollama"),
+                smart_chat(f"Rephrase briefly: {question}", preferred_provider="bedrock"),
                 timeout=1.5  # Very aggressive timeout
             )
             
@@ -795,8 +795,8 @@ async def lightning_answer(
             context_start = time.time()
             
             # Smart context limits for speed
-            if provider == "ollama":
-                context_budget = int(settings.ollama_num_ctx * 0.7)  # 70% of Ollama context
+            if provider == "bedrock":
+                context_budget = int(config.max_context_tokens * 0.7)  # 70% of context limit
             else:
                 context_budget = 20000 if max_context else 8000
             

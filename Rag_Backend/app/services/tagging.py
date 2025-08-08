@@ -382,7 +382,7 @@ class EnhancedTagger:
     
     async def make_demo_tags(self, text: str, llm) -> List[str]:
         """
-        Extract demographic groups with memory-efficient processing
+        Extract demographic groups with memory-efficient processing and robust error handling
         
         Args:
             text: Input text to extract demographics from
@@ -393,29 +393,96 @@ class EnhancedTagger:
         """
         start_time = time.time()
         
+        # Input validation
+        if not text or not isinstance(text, str) or len(text.strip()) < 10:
+            logger.warning("Invalid or insufficient text for demographic extraction")
+            return []
+        
         # For demographic extraction, we can use a simpler approach
         # since we're looking for specific patterns
         tokens = estimate_tokens(text)
+        logger.info(f"Demographic extraction: Processing {tokens} tokens")
         
         try:
             if tokens > 10000:
-                # Process in chunks for large documents
+                # Process in chunks for large documents with enhanced error handling
                 chunks = self._create_semantic_chunks(text, max_size=3000)
                 all_demographics = []
+                successful_chunks = 0
                 
-                for chunk in chunks[:5]:  # Limit to first 5 chunks
-                    demo_tags = await self._extract_demographics_from_chunk(chunk, llm)
-                    all_demographics.extend(demo_tags)
+                for i, chunk in enumerate(chunks[:5]):  # Limit to first 5 chunks
+                    try:
+                        # Validate chunk before processing
+                        if not chunk or len(chunk.strip()) < 10:
+                            logger.warning(f"Skipping invalid chunk {i}")
+                            continue
+                            
+                        demo_tags = await self._extract_demographics_from_chunk(chunk, llm)
+                        
+                        # Robust type checking and validation
+                        if demo_tags is not None and isinstance(demo_tags, list):
+                            # Filter out invalid items
+                            valid_tags = []
+                            for tag in demo_tags:
+                                if tag and isinstance(tag, (str, int, float)):
+                                    str_tag = str(tag).strip()
+                                    if str_tag and len(str_tag) > 1:
+                                        valid_tags.append(str_tag)
+                            
+                            if valid_tags:
+                                all_demographics.extend(valid_tags)
+                                successful_chunks += 1
+                                logger.info(f"Successfully processed chunk {i}: {len(valid_tags)} demographics")
+                        else:
+                            logger.warning(f"Invalid result type from chunk {i}: {type(demo_tags)}")
+                            
+                    except LookupError as lookup_error:
+                        logger.error(f"LookupError in chunk {i}: {lookup_error}")
+                        continue
+                    except Exception as chunk_error:
+                        logger.error(f"Failed to extract demographics from chunk {i}: {type(chunk_error).__name__}: {chunk_error}")
+                        continue
+                
+                logger.info(f"Processed {successful_chunks} out of {min(5, len(chunks))} chunks successfully")
                 
                 # Deduplicate and limit
-                unique_demographics = list(dict.fromkeys(all_demographics))
-                return unique_demographics[:10]
+                if all_demographics:
+                    unique_demographics = list(dict.fromkeys(all_demographics))
+                    return unique_demographics[:10]
+                else:
+                    logger.warning("No demographics extracted from any chunks")
+                    return []
             else:
-                # Direct processing for smaller texts
-                return await self._extract_demographics_from_chunk(text[:3000], llm)
+                # Direct processing for smaller texts with enhanced error handling
+                try:
+                    # Truncate text to prevent token overflow
+                    truncated_text = text[:3000] if len(text) > 3000 else text
+                    
+                    result = await self._extract_demographics_from_chunk(truncated_text, llm)
+                    
+                    # Validate result
+                    if result is not None and isinstance(result, list):
+                        # Filter and validate items
+                        valid_results = []
+                        for item in result:
+                            if item and isinstance(item, (str, int, float)):
+                                str_item = str(item).strip()
+                                if str_item and len(str_item) > 1:
+                                    valid_results.append(str_item)
+                        return valid_results[:10]
+                    else:
+                        logger.warning(f"Invalid direct extraction result type: {type(result)}")
+                        return []
+                        
+                except LookupError as lookup_error:
+                    logger.error(f"LookupError in direct demographic extraction: {lookup_error}")
+                    return []
+                except Exception as direct_error:
+                    logger.error(f"Direct demographic extraction failed: {type(direct_error).__name__}: {direct_error}")
+                    return []
                 
         except Exception as e:
-            logger.error(f"Demographic extraction failed: {e}")
+            logger.error(f"Demographic extraction failed with unexpected error: {type(e).__name__}: {e}")
             return []
         finally:
             duration = time.time() - start_time
@@ -1228,31 +1295,119 @@ class EnhancedTagger:
         return meaningful_tags[:self.config.final_tag_limit]
     
     async def _extract_demographics_from_chunk(self, text: str, llm) -> List[str]:
-        """Extract demographic information from a text chunk"""
-        prompt = (
-            "Identify demographic groups mentioned in the text below:\n\n"
-            "### DEMOGRAPHIC CATEGORIES\n"
-            "age, gender, region, income, education, occupation, ethnicity, research\n\n"
-            "### RULES\n"
-            "- Return ONLY JSON array of strings\n"
-            "- Use concise descriptors (e.g., '25-34 years', 'College educated')\n"
-            "- Normalize formats (age ranges, income brackets)\n"
-            "- Maximum 10 groups\n\n"
-            "### EXAMPLES\n"
-            '["25-34 years", "Female", "Urban residents", "$50k-$75k income", "Research"]\n\n'
-            f"TEXT:\n{text}"
-        )
-        
+        """Extract demographic information from a text chunk with comprehensive error handling"""
         try:
-            response = await llm.chat(prompt)
-            # Extract first JSON array
-            if '[' in response and ']' in response:
-                json_str = re.search(r'\[.*\]', response, re.DOTALL).group()
-                return json.loads(json_str)
-            else:
+            # Input validation with detailed logging
+            if not text or not isinstance(text, str):
+                logger.warning(f"Invalid text input for demographic extraction: {type(text)}")
                 return []
+            
+            text_stripped = text.strip()
+            if len(text_stripped) < 10:
+                logger.warning(f"Text too short for demographic extraction: {len(text_stripped)} chars")
+                return []
+            
+            # Truncate text to prevent token overflow
+            safe_text = text_stripped[:2000] if len(text_stripped) > 2000 else text_stripped
+            
+            prompt = (
+                "Identify demographic groups mentioned in the text below:\n\n"
+                "### DEMOGRAPHIC CATEGORIES\n"
+                "age, gender, region, income, education, occupation, ethnicity, research\n\n"
+                "### RULES\n"
+                "- Return ONLY JSON array of strings\n"
+                "- Use concise descriptors (e.g., '25-34 years', 'College educated')\n"
+                "- Normalize formats (age ranges, income brackets)\n"
+                "- Maximum 10 groups\n\n"
+                "### EXAMPLES\n"
+                '["25-34 years", "Female", "Urban residents", "$50k-$75k income", "Research"]\n\n'
+                f"TEXT:\n{safe_text}"
+            )
+            
+            # Validate LLM object
+            if not llm or not hasattr(llm, 'chat'):
+                logger.error("Invalid LLM object provided for demographic extraction")
+                return []
+            
+            # Call LLM with comprehensive error handling
+            try:
+                response = await llm.chat(prompt)
+                logger.info(f"LLM response received for demographics: {len(str(response)) if response else 0} chars")
+            except LookupError as lookup_error:
+                logger.error(f"LookupError during LLM call: {lookup_error}")
+                return []
+            except Exception as llm_error:
+                logger.error(f"LLM call failed: {type(llm_error).__name__}: {llm_error}")
+                return []
+            
+            # Validate LLM response
+            if not response:
+                logger.warning("Empty response from LLM for demographics")
+                return []
+            
+            if not isinstance(response, str):
+                logger.warning(f"Invalid LLM response type for demographics: {type(response)}")
+                return []
+            
+            # Extract and parse JSON with robust error handling
+            try:
+                # Look for JSON array in response
+                if '[' not in response or ']' not in response:
+                    logger.warning("No JSON array brackets found in LLM response for demographics")
+                    return []
+                
+                # Extract JSON string
+                json_match = re.search(r'\[.*?\]', response, re.DOTALL)
+                if not json_match:
+                    logger.warning("No valid JSON array pattern found in LLM response")
+                    return []
+                
+                json_str = json_match.group()
+                logger.info(f"Extracted JSON string: {json_str[:100]}...")
+                
+                # Parse JSON
+                try:
+                    parsed_result = json.loads(json_str)
+                except json.JSONDecodeError as json_error:
+                    logger.warning(f"JSON decode error: {json_error}")
+                    return []
+                
+                # Validate parsed result
+                if not isinstance(parsed_result, list):
+                    logger.warning(f"Parsed result is not a list: {type(parsed_result)}")
+                    return []
+                
+                # Process and validate each item
+                valid_items = []
+                for i, item in enumerate(parsed_result):
+                    try:
+                        if item is None:
+                            continue
+                        
+                        # Convert to string and validate
+                        if isinstance(item, (str, int, float)):
+                            str_item = str(item).strip()
+                            if str_item and len(str_item) > 1:
+                                valid_items.append(str_item)
+                        else:
+                            logger.warning(f"Invalid item type at index {i}: {type(item)}")
+                            
+                    except Exception as item_error:
+                        logger.warning(f"Error processing item {i}: {type(item_error).__name__}: {item_error}")
+                        continue
+                
+                logger.info(f"Successfully extracted {len(valid_items)} demographic items")
+                return valid_items[:10]  # Limit to 10 items
+                
+            except Exception as parse_error:
+                logger.error(f"Error during JSON parsing: {type(parse_error).__name__}: {parse_error}")
+                return []
+                
+        except LookupError as lookup_error:
+            logger.error(f"LookupError in demographic extraction: {lookup_error}")
+            return []
         except Exception as e:
-            logger.warning(f"Demographic extraction failed: {e}")
+            logger.error(f"Unexpected error in demographic extraction: {type(e).__name__}: {e}")
             return []
     
     async def _fallback_tag_extraction(self, text: str, llm) -> List[str]:

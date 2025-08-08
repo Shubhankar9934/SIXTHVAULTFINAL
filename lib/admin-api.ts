@@ -1,4 +1,4 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
+const API_BASE_URL = process.env.NEXT_PUBLIC_RAG_API_URL || 'https://sixth-vault.com/api'
 
 class AdminAPI {
   private getAuthHeaders() {

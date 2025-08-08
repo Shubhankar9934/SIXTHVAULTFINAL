@@ -39,6 +39,10 @@ class AICuration(SQLModel, table=True):
     generation_method: str = Field(default="auto")  # auto, manual, incremental
     document_count: int = Field(default=0)
     relevance_threshold: float = Field(default=0.5)
+    content: Optional[str] = None  # Store the generated curation content
+    content_generated: bool = Field(default=False)  # Track if content has been generated
+    provider_used: Optional[str] = None  # Track which AI provider was used
+    model_used: Optional[str] = None  # Track which model was used
 
 class CurationSettings(SQLModel, table=True):
     __tablename__ = "curation_settings"
@@ -150,6 +154,77 @@ class SummaryGenerationHistory(SQLModel, table=True):
     error_message: Optional[str] = None
     meta_data: dict = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: dt.datetime = Field(default_factory=dt.datetime.utcnow)
+
+# Chat History Models - NEW
+class Conversation(SQLModel, table=True):
+    __tablename__ = "conversations"
+    
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    owner_id: str = Field(foreign_key="users.id")
+    tenant_id: Optional[str] = Field(foreign_key="tenants.id")  # Add tenant isolation
+    title: str  # Auto-generated from first message or user-defined
+    created_at: dt.datetime = Field(default_factory=dt.datetime.utcnow)
+    updated_at: dt.datetime = Field(default_factory=dt.datetime.utcnow)
+    message_count: int = Field(default=0)
+    is_archived: bool = Field(default=False)
+    is_pinned: bool = Field(default=False)
+    tags: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    
+    # Conversation metadata
+    total_tokens_used: int = Field(default=0)
+    primary_provider: Optional[str] = None  # Most used provider in this conversation
+    primary_model: Optional[str] = None  # Most used model in this conversation
+    document_ids_referenced: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+
+class Message(SQLModel, table=True):
+    __tablename__ = "messages"
+    
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    conversation_id: str = Field(foreign_key="conversations.id")
+    role: str  # "user", "assistant", "curation", "summary"
+    content: str
+    created_at: dt.datetime = Field(default_factory=dt.datetime.utcnow)
+    
+    # RAG-specific fields
+    provider_used: Optional[str] = None
+    model_used: Optional[str] = None
+    document_ids: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    sources: List[dict] = Field(default_factory=list, sa_column=Column(JSON))
+    context_mode: Optional[str] = None  # "hybrid", "pure_rag"
+    
+    # Message metadata
+    message_metadata: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    tokens_used: Optional[int] = None
+    response_time_ms: Optional[int] = None
+    
+    # For curations and summaries
+    curation_id: Optional[str] = None  # Link to AICuration if this is a curation message
+    summary_id: Optional[str] = None   # Link to AISummary if this is a summary message
+    
+    # Message status
+    is_edited: bool = Field(default=False)
+    edit_history: List[dict] = Field(default_factory=list, sa_column=Column(JSON))
+
+class ConversationSettings(SQLModel, table=True):
+    __tablename__ = "conversation_settings"
+    
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    owner_id: str = Field(foreign_key="users.id", unique=True)
+    
+    # Auto-save settings
+    auto_save_conversations: bool = Field(default=True)
+    auto_generate_titles: bool = Field(default=True)
+    max_conversations: int = Field(default=100)
+    auto_archive_after_days: int = Field(default=30)
+    
+    # Default conversation behavior
+    default_provider: str = Field(default="gemini")
+    default_model: str = Field(default="gemini-1.5-flash")
+    save_curation_conversations: bool = Field(default=True)
+    save_summary_conversations: bool = Field(default=True)
+    
+    created_at: dt.datetime = Field(default_factory=dt.datetime.utcnow)
+    updated_at: dt.datetime = Field(default_factory=dt.datetime.utcnow)
 
 class ProcessingDocument(SQLModel, table=True):
     """Database-backed processing tracker for user isolation and persistence"""

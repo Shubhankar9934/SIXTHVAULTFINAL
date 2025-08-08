@@ -113,8 +113,6 @@ enum AuthError {
 
 export function middleware(request: NextRequest) {
   const response = NextResponse.next();
-  response.headers.set('ngrok-skip-browser-warning', 'true');
-  response.headers.set('User-Agent', 'CustomAgent/1.0');
 
   const { pathname } = request.nextUrl
   

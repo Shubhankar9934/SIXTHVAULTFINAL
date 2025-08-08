@@ -52,6 +52,7 @@ import {
   Plus,
   Minus,
   LogOut,
+  History,
 } from "lucide-react"
 import {
   Command,
@@ -79,56 +80,43 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import Link from "next/link"
 import SixthvaultLogo from "@/components/SixthvaultLogo"
-import { documentStore, type DocumentData } from "@/lib/document-store"
-import { aiService } from "@/lib/ai-service"
-import { ragApiClient, type QueryResponse, type BackendDocument, type AvailableModel, type ModelProvider } from "@/lib/api-client"
-import { aiCurationService } from "@/lib/ai-curation-service"
-import { aiSummaryService } from "@/lib/ai-summary-service"
 import { RouteGuard } from "@/components/route-guard"
 import { useAuth } from "@/lib/auth-context"
+import { useVaultState } from "@/lib/vault-state-provider"
+import { cacheManager } from "@/lib/cache-manager"
+import HistorySection from "./history-section"
 
 function VaultPageContent() {
   const { logout, user } = useAuth()
-  const [selectedFiles, setSelectedFiles] = useState<string[]>([])
+  const {
+    state,
+    dispatch,
+    // UI actions
+    toggleSidebar,
+    toggleSidebarExpansion,
+    setActiveTab,
+    toggleExpandedSources,
+    toggleExpandedRelevance,
+    // Settings actions
+    updateProviderSettings,
+    updateContextSettings,
+    setSearchTag,
+    setSelectedFiles,
+    // Content generation actions
+    generateCurationContent,
+    generateSummaryContent,
+    createCustomCuration,
+    createCustomSummary,
+    deleteCuration,
+    // Conversation actions
+    sendMessage,
+    loadConversationHistory,
+    startNewConversation,
+  } = useVaultState()
+
+  // Local state for modals and input
   const [documentSelectorOpen, setDocumentSelectorOpen] = useState(false)
-  const [searchTag, setSearchTag] = useState("")
-  const [keepContext, setKeepContext] = useState("NO")
-  const [selectedProvider, setSelectedProvider] = useState("gemini")
-  const [selectedModel, setSelectedModel] = useState("")
-  const [availableModels, setAvailableModels] = useState<AvailableModel[]>([])
-  const [modelProviders, setModelProviders] = useState<ModelProvider[]>([])
-  const [providerError, setProviderError] = useState<string>("")
-  const [maxContext, setMaxContext] = useState("YES")
   const [inputMessage, setInputMessage] = useState("")
-  const [isLoading, setIsLoading] = useState(false)
-  const [documents, setDocuments] = useState<DocumentData[]>([])
-  const [availableTags, setAvailableTags] = useState<string[]>([])
-  const [activeCuration, setActiveCuration] = useState("")
-  const [activeSummary, setActiveSummary] = useState("")
-  const [isGeneratingCuration, setIsGeneratingCuration] = useState(false)
-  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false)
-  const [dynamicCurations, setDynamicCurations] = useState<Array<{ title: string; icon: React.ComponentType<any>; active: boolean }>>([])
-  const [dynamicSummaries, setDynamicSummaries] = useState<Array<{ name: string; active: boolean }>>([])
-  const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [sidebarExpanded, setSidebarExpanded] = useState(true)
-  const [chatMessages, setChatMessages] = useState<
-    Array<{
-      id: number
-      type: "user" | "ai" | "curation" | "summary"
-      content: string
-      title?: string
-      themes?: string[]
-      language?: string
-      documentsUsed?: number
-      documentNames?: string[]
-      contextMode?: string
-      isGenerating?: boolean
-      timestamp?: string
-      relevanceScores?: Array<{ name: string; score: number }>
-    }>
-  >([])
-  const [expandedSources, setExpandedSources] = useState<Set<number>>(new Set())
-  const [expandedRelevance, setExpandedRelevance] = useState<Set<number>>(new Set())
 
   // Custom Curation Modal State
   const [showCustomCurationModal, setShowCustomCurationModal] = useState(false)
@@ -145,663 +133,149 @@ function VaultPageContent() {
   const [customSummaryFocusArea, setCustomSummaryFocusArea] = useState("")
   const [isCreatingCustomSummary, setIsCreatingCustomSummary] = useState(false)
 
-  // Check if we're on mobile
-  const [isMobile, setIsMobile] = useState(false)
+  // Extract state values for easier access
+  const {
+    documents: { data: documents, availableTags, selectedFiles },
+    curations: { customCurations, dynamicCurations, activeCuration, isGenerating: isGeneratingCuration },
+    summaries: { dynamicSummaries, activeSummary, isGenerating: isGeneratingSummary },
+    conversations: { chatMessages, currentConversationId, selectedConversationId, conversationTitle },
+    ui: { activeTab, sidebarOpen, sidebarExpanded, expandedSources, expandedRelevance },
+    settings: { selectedProvider, selectedModel, availableModels, modelProviders, keepContext, maxContext, searchTag }
+  } = state
 
-  useEffect(() => {
-    const checkMobile = () => {
-      const isMobileView = window.innerWidth < 768
-      setIsMobile(isMobileView)
-      if (isMobileView) {
-        setSidebarOpen(false)
-        setSidebarExpanded(false)
-      } else {
-        setSidebarOpen(true)
-        setSidebarExpanded(true)
-      }
-    }
+  // The global state provider handles all initialization automatically
+  // No need for manual loading effects - everything is cached and preloaded
 
-    checkMobile()
-    window.addEventListener("resize", checkMobile)
-    return () => window.removeEventListener("resize", checkMobile)
-  }, [])
-
-  // Load available models on mount with enhanced error handling
-  useEffect(() => {
-    const loadModels = async () => {
-      try {
-        console.log('🔧 Vault: Loading AI providers and models...')
-        setProviderError("") // Clear any previous errors
-        
-        const providers = await ragApiClient.getAvailableModels()
-        console.log('✅ Vault: Successfully loaded providers:', providers.length)
-        
-        setModelProviders(providers)
-        
-        // Set available models for the selected provider
-        const currentProvider = providers.find(p => p.name === selectedProvider)
-        if (currentProvider) {
-          setAvailableModels(currentProvider.models)
-          console.log(`✅ Vault: Set ${currentProvider.models.length} models for ${selectedProvider} provider`)
-          
-          // Set default model if none selected
-          if (!selectedModel && currentProvider.models.length > 0) {
-            setSelectedModel(currentProvider.models[0].name)
-            console.log(`✅ Vault: Set default model: ${currentProvider.models[0].name}`)
-          }
-        } else {
-          console.warn(`⚠️ Vault: Provider ${selectedProvider} not found in loaded providers`)
-          setAvailableModels([])
-        }
-        
-        // Log final state for debugging
-        console.log('🎯 Vault: Final provider state:')
-        console.log(`   - Total providers: ${providers.length}`)
-        console.log(`   - Selected provider: ${selectedProvider}`)
-        console.log(`   - Available models: ${availableModels.length}`)
-        console.log(`   - Selected model: ${selectedModel}`)
-        
-      } catch (error) {
-        console.error('❌ Vault: Failed to load AI providers and models:', error)
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error loading providers'
-        setProviderError(errorMessage)
-        
-        // Set empty fallback state
-        setModelProviders([])
-        setAvailableModels([])
-        setSelectedModel("")
-      }
-    }
-
-    loadModels()
-  }, [])
-
-  // Update available models when provider changes
-  useEffect(() => {
-    const currentProvider = modelProviders.find(p => p.name === selectedProvider)
-    if (currentProvider) {
-      setAvailableModels(currentProvider.models)
-      // Reset model selection when provider changes
-      if (currentProvider.models.length > 0) {
-        setSelectedModel(currentProvider.models[0].name)
-      } else {
-        setSelectedModel("")
-      }
-    }
-  }, [selectedProvider, modelProviders])
-
-  // Load documents on mount - ENHANCED FOR NGROK COMPATIBILITY
-  useEffect(() => {
-    const loadDocuments = async () => {
-      try {
-        console.log('Vault: Loading documents from backend (ngrok-enhanced)')
-        
-        // Clear any existing state
-        setDocuments([])
-        setAvailableTags([])
-        
-        // Add loading timeout warning for ngrok tunnels
-        const loadingTimeout = setTimeout(() => {
-          console.warn('Vault: Document loading taking longer than expected (ngrok tunnel may have higher latency)')
-        }, 5000)
-        
-        // Fetch documents with enhanced error handling
-        const docs = await documentStore.getDocuments()
-        clearTimeout(loadingTimeout)
-        
-        console.log('Vault: Documents loaded successfully:', docs.length)
-        
-        if (docs.length > 0) {
-          setDocuments(docs)
-          
-          // Extract all unique tags/themes
-          const allTags = new Set<string>()
-          docs.forEach((doc) => {
-            doc.themes.forEach((theme) => allTags.add(theme))
-            doc.keywords.forEach((keyword) => allTags.add(keyword))
-          })
-          setAvailableTags(Array.from(allTags))
-
-          // Generate dynamic curations based on uploaded documents
-          generateDynamicCurations(docs)
-          generateDynamicSummaries(docs)
-          
-          console.log('Vault: Document processing completed successfully')
-        } else {
-          console.log('Vault: No documents found')
-          setDocuments([])
-          setAvailableTags([])
-          generateDynamicCurations([])
-          generateDynamicSummaries([])
-        }
-        
-      } catch (error) {
-        console.error('Vault: Critical error loading documents:', error)
-        
-        // Show user-friendly error for ngrok issues
-        if (error instanceof Error && (
-          error.message.includes('Authentication failed') ||
-          error.message.includes('Failed to fetch') ||
-          error.message.includes('NetworkError')
-        )) {
-          console.error('Vault: Network/Auth error detected - may be ngrok tunnel issue')
-          // Could show a toast notification here if needed
-        }
-        
-        // Set empty state on error (no localStorage fallback)
-        setDocuments([])
-        setAvailableTags([])
-        generateDynamicCurations([])
-        generateDynamicSummaries([])
-      }
-    }
-
-    // Load immediately with error boundary
-    loadDocuments()
-  }, []) // Remove any dependencies to prevent re-runs
-
-  const generateDynamicCurations = (docs: DocumentData[]) => {
-    if (docs.length === 0) {
-      // No default curations when no documents are uploaded
-      setDynamicCurations([])
-      return
-    }
-
-    // Extract themes and topics from documents to create dynamic curations
-    const allThemes = new Set<string>()
-    const allTopics = new Set<string>()
-    const allDemographics = new Set<string>()
-
-    docs.forEach((doc) => {
-      doc.themes?.forEach((theme) => allThemes.add(theme))
-      doc.mainTopics?.forEach((topic) => allTopics.add(topic))
-      doc.demographics?.forEach((demo) => allDemographics.add(demo))
-    })
-
-    const themes = Array.from(allThemes).slice(0, 8)
-    const topics = Array.from(allTopics).slice(0, 6)
-    const demographics = Array.from(allDemographics).slice(0, 4)
-
-    const dynamicCurationsList: Array<{ title: string; icon: React.ComponentType<any>; active: boolean }> = []
-
-    // Create curations based on most common themes
-    if (themes.length > 0) {
-      dynamicCurationsList.push({
-        title: `Top ${Math.min(5, themes.length)} ${themes[0]} Trends`,
-        icon: TrendingUp,
-        active: false,
-      })
-    }
-
-    // Create curations based on topics
-    if (topics.length > 0) {
-      dynamicCurationsList.push({
-        title: `${topics[0]} Industry Analysis`,
-        icon: BarChart3,
-        active: false,
-      })
-    }
-
-    // Create demographic-based curations
-    if (demographics.length > 0) {
-      dynamicCurationsList.push({
-        title: `Trends for ${demographics[0]} Market`,
-        icon: Users,
-        active: false,
-      })
-    }
-
-    // Add technology-focused curation if tech themes are present
-    const techThemes = themes.filter(
-      (theme) =>
-        theme.toLowerCase().includes("tech") ||
-        theme.toLowerCase().includes("digital") ||
-        theme.toLowerCase().includes("ai") ||
-        theme.toLowerCase().includes("innovation"),
-    )
-    if (techThemes.length > 0) {
-      dynamicCurationsList.push({
-        title: `Digital Innovation Insights`,
-        icon: Brain,
-        active: false,
-      })
-    }
-
-    // Ensure we have at least 4 curations, fill with defaults if needed
-    while (dynamicCurationsList.length < 4) {
-      const defaultCurations = [
-        { title: "Document Insights Summary", icon: FileText, active: false },
-        { title: "Key Themes Analysis", icon: TrendingUp, active: false },
-        { title: "Market Trends Overview", icon: Globe, active: false },
-        { title: "Business Intelligence Report", icon: Building2, active: false },
-      ]
-
-      const missingCuration = defaultCurations.find(
-        (def) => !dynamicCurationsList.some((dyn) => dyn.title === def.title),
-      )
-      if (missingCuration) {
-        dynamicCurationsList.push(missingCuration)
-      } else {
-        break
-      }
-    }
-
-    setDynamicCurations(dynamicCurationsList.slice(0, 4))
-  }
-
-  const generateDynamicSummaries = (docs: DocumentData[]) => {
-    if (docs.length === 0) {
-      // No default summaries when no documents are uploaded
-      setDynamicSummaries([])
-      return
-    }
-
-    if (docs.length === 1) {
-      // Single document: One overall summary + 3 empty cards
-      setDynamicSummaries([
-        { name: "Overall Summary", active: false },
-        { name: "", active: false },
-        { name: "", active: false },
-        { name: "", active: false },
-        { name: "", active: false },
-      ])
-      return
-    }
-
-    // Multiple documents: Individual summaries for each doc + one combined summary
-    const summaries = []
-
-    // Add individual document summaries (up to 3 to leave space for combined)
-    const maxIndividualSummaries = Math.min(docs.length, 3)
-    docs.slice(0, maxIndividualSummaries).forEach((doc) => {
-      const docName = doc.name.split(".")[0]
-      const shortName = docName.length > 12 ? docName.substring(0, 12) + "..." : docName
-      summaries.push({ name: shortName, active: false })
-    })
-
-    // Add combined summary as the last card
-    summaries.push({ name: "Combined Summary", active: false })
-
-    // If we have exactly 4 cards, we're done
-    // If we have less than 4, fill with empty cards
-    while (summaries.length < 4) {
-      summaries.push({ name: "", active: false })
-    }
-
-    // If we have more than 4 docs, we need to adjust
-    if (docs.length > 3) {
-      // Show first 3 individual docs + combined summary
-      const adjustedSummaries = []
-
-      docs.slice(0, 3).forEach((doc) => {
-        const docName = doc.name.split(".")[0]
-        const shortName = docName.length > 12 ? docName.substring(0, 12) + "..." : docName
-        adjustedSummaries.push({ name: shortName, active: false })
-      })
-
-      adjustedSummaries.push({ name: "Combined Summary", active: false })
-      setDynamicSummaries(adjustedSummaries)
+  // Helper function to get icon based on keywords
+  const getIconForCuration = (keywords: string[]) => {
+    const keywordsStr = (keywords || []).join(' ').toLowerCase()
+    
+    if (keywordsStr.includes('trend') || keywordsStr.includes('growth')) {
+      return TrendingUp
+    } else if (keywordsStr.includes('market') || keywordsStr.includes('business')) {
+      return BarChart3
+    } else if (keywordsStr.includes('user') || keywordsStr.includes('customer') || keywordsStr.includes('demographic')) {
+      return Users
+    } else if (keywordsStr.includes('tech') || keywordsStr.includes('digital') || keywordsStr.includes('innovation')) {
+      return Brain
+    } else if (keywordsStr.includes('industry') || keywordsStr.includes('sector')) {
+      return Building2
+    } else if (keywordsStr.includes('global') || keywordsStr.includes('world') || keywordsStr.includes('international')) {
+      return Globe
     } else {
-      setDynamicSummaries(summaries.slice(0, 4))
+      return Sparkles // Default icon
     }
   }
 
-  const handleSendMessage = async () => {
-    if (!inputMessage.trim()) return
-
-    const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-
-    const userMessage = {
-      id: Date.now(),
-      type: "user" as const,
-      content: inputMessage,
-      timestamp,
+  // Helper function to generate conversation titles
+  const generateConversationTitle = (firstMessage: string): string => {
+    // Extract key words and create a meaningful title
+    const words = firstMessage.toLowerCase().split(' ')
+    const stopWords = ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'what', 'how', 'why', 'when', 'where', 'can', 'could', 'would', 'should']
+    const keyWords = words.filter(word => !stopWords.includes(word) && word.length > 2).slice(0, 3)
+    
+    if (keyWords.length > 0) {
+      return keyWords.map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
     }
+    
+    // Fallback titles based on content
+    if (firstMessage.toLowerCase().includes('market')) return 'Market Analysis'
+    if (firstMessage.toLowerCase().includes('trend')) return 'Trend Analysis'
+    if (firstMessage.toLowerCase().includes('customer')) return 'Customer Insights'
+    if (firstMessage.toLowerCase().includes('business')) return 'Business Discussion'
+    if (firstMessage.toLowerCase().includes('data')) return 'Data Analysis'
+    
+    return 'New Conversation'
+  }
 
-    setChatMessages((prev) => [...prev, userMessage])
-    const currentMessage = inputMessage
-    setInputMessage("")
-    setIsLoading(true)
-
+  const handleCurationClick = async (curationTitle: string, isExistingCuration: boolean = true) => {
     try {
-      // Get documents from backend (no localStorage)
-      const allDocs = await documentStore.getDocuments()
-
-      // Prepare document IDs for filtering
-      let documentIds: string[] | undefined = undefined
-      if (selectedFiles.length > 0) {
-        documentIds = selectedFiles // Multiple documents selected
+      // Check if we have any documents available
+      if (documents.length === 0) {
+        console.log('⚠️ Vault: No documents available for curation generation')
+        
+        const errorMessage = {
+          id: Date.now(),
+          type: "ai" as const,
+          content: `Sorry, I can't generate the "${curationTitle}" curation because no documents are available. Please upload some documents first.`,
+          timestamp: new Date().toISOString()
+        }
+        
+        dispatch({ type: 'ADD_CHAT_MESSAGE', payload: errorMessage })
+        return
       }
-      // If selectedFiles is empty, documentIds remains undefined (search all documents)
 
-      // Use RAG backend with selected provider and model
-      const queryResponse = await ragApiClient.queryDocuments(currentMessage, {
-        hybrid: keepContext !== "YES", // Hybrid mode when not pure RAG
-        maxContext: maxContext === "YES", // Use max context when enabled
-        documentIds: documentIds, // Pass selected document IDs
-        provider: selectedProvider, // Pass selected AI provider
-        model: selectedModel // Pass selected model
-      })
+      // FIXED: Always start a new conversation for each curation click
+      console.log('🆕 Vault: Starting new conversation for curation:', curationTitle)
+      startNewConversation()
 
-      // Debug logging to check the response structure
-      console.log('RAG Query Response:', queryResponse)
-      console.log('Sources:', queryResponse.sources)
-      console.log('Sources length:', queryResponse.sources?.length)
-
-      // Check if we have sources data, if not, add some test data for UI verification
-      let documentNames: string[] = []
-      let relevanceScores: Array<{ name: string; score: number }> = []
-      
-      if (queryResponse.sources && queryResponse.sources.length > 0) {
-        // Use real data from backend
-        documentNames = queryResponse.sources.map(s => s.document)
-        relevanceScores = queryResponse.sources.map(s => ({ name: s.document, score: s.score }))
+      if (isExistingCuration) {
+        // FIXED: Check for cached content at the page level first to prevent any loading states
+        const curation = [...customCurations, ...dynamicCurations].find(c => c.title === curationTitle)
+        if (curation) {
+          const contentCacheKey = `curation_content_${curation.id}`
+          const cachedContent = cacheManager.get<string>(contentCacheKey)
+          
+          if (cachedContent) {
+            // Display cached content instantly without any loading state or API calls
+            console.log('⚡ Vault: Found cached content, displaying instantly without any loaders:', curationTitle)
+            
+            const cachedMessage = {
+              id: Date.now(),
+              type: "curation" as const,
+              content: cachedContent,
+              title: curationTitle,
+              isGenerating: false,
+              themes: ["AI Curation", "Cached Content", "Instant Access"],
+              documentsUsed: selectedFiles.length > 0 ? selectedFiles.length : documents.length,
+              documentNames: selectedFiles.length > 0 
+                ? selectedFiles.map(fileId => {
+                    const doc = documents.find(d => d.id === fileId)
+                    return doc?.name || fileId
+                  })
+                : documents.map(doc => doc.name),
+              timestamp: new Date().toISOString(),
+              cached: true
+            }
+            
+            dispatch({ type: 'ADD_CHAT_MESSAGE', payload: cachedMessage })
+            return // Exit early - no need to call any generation functions
+          }
+        }
+        
+        // Only call generateCurationContent if no cached content exists
+        console.log('🔄 Vault: No cached content found, calling generation function:', curationTitle)
+        await generateCurationContent(curationTitle, curationTitle)
       } else {
-        // Fallback: Add test data to verify UI functionality
-        console.warn('No sources returned from RAG backend, using test data for UI verification')
-        documentNames = [
-          "Sample Document 1.pdf",
-          "Market Research Report.docx", 
-          "Consumer Trends Analysis.pdf"
-        ]
-        relevanceScores = [
-          { name: "Sample Document 1.pdf", score: 0.892 },
-          { name: "Market Research Report.docx", score: 0.756 },
-          { name: "Consumer Trends Analysis.pdf", score: 0.634 }
-        ]
+        // This is a user question that should go through the chat interface in the new conversation
+        console.log('Vault: Redirecting question to chat interface in new conversation:', curationTitle)
+        await sendMessage(curationTitle)
       }
-
-      const aiMessage = {
-        id: Date.now() + 1,
-        type: "ai" as const,
-        content: queryResponse.answer,
-        themes: ["RAG Response", "RAG Backend", maxContext === "YES" ? "Max Context" : "Standard Context"],
-        language: "English",
-        documentsUsed: documentNames.length,
-        documentNames: documentNames,
-        contextMode: keepContext === "YES" ? "documents-only" : "hybrid",
-        relevanceScores: relevanceScores,
-        timestamp,
-      }
-
-      // Debug logging to check the processed data
-      console.log('AI Message:', aiMessage)
-      console.log('Document Names:', aiMessage.documentNames)
-      console.log('Relevance Scores:', aiMessage.relevanceScores)
-
-      setChatMessages((prev) => [...prev, aiMessage])
     } catch (error) {
-      console.error("RAG Chat error:", error)
-      const errorMessage = {
-        id: Date.now() + 1,
-        type: "ai" as const,
-        content: `Sorry, I encountered an error: ${error instanceof Error ? error.message : "Unknown error"}. Please try again.`,
-        themes: ["Error"],
-        language: "English",
-        timestamp,
-      }
-      setChatMessages((prev) => [...prev, errorMessage])
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
-  const handleCurationClick = async (curationTitle: string) => {
-    setActiveCuration(curationTitle)
-    setIsGeneratingCuration(true)
-
-    // On mobile, close sidebar after selection
-    if (isMobile) {
-      setSidebarOpen(false)
-    }
-
-    // Update the active state
-    setDynamicCurations((prev) => prev.map((c) => ({ ...c, active: c.title === curationTitle })))
-
-    const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-
-    // Add a loading message to chat
-    const loadingMessage = {
-      id: Date.now(),
-      type: "curation" as const,
-      content: "",
-      title: curationTitle,
-      isGenerating: true,
-      timestamp,
-    }
-    setChatMessages((prev) => [...prev, loadingMessage])
-
-    try {
-      // Use RAG API client with selected provider and model for curation generation
-      const curationPrompt = `Generate content for a business curation titled "${curationTitle}".
-        
-        Base your analysis on these uploaded documents:
-        ${documents.map(doc => `Document: ${doc.name}
-         Themes: ${doc.themes?.join(", ") || "N/A"}
-         Summary: ${doc.summary?.substring(0, 200) || "No summary available"}...`).join("\n\n")}
-        
-        Create a beautifully formatted response using markdown with:
-        - A compelling introduction
-        - 3-5 key points with supporting details
-        - Relevant statistics or examples
-        - A concise conclusion with actionable insights
-        
-        Make it professional, visually structured, and actionable.`
-
-      const curationResponse = await ragApiClient.queryDocuments(curationPrompt, {
-        hybrid: false, // Use pure AI generation for curations
-        maxContext: true,
-        documentIds: documents.map(doc => doc.id),
-        provider: selectedProvider, // Use selected AI provider
-        model: selectedModel // Use selected model
-      })
-
-      // Update the message with the generated content
-      setChatMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === loadingMessage.id
-            ? {
-                ...msg,
-                content: curationResponse.answer,
-                isGenerating: false,
-                themes: ["AI Curation", "Dynamic Content", `${selectedProvider.toUpperCase()} Generated`],
-                documentsUsed: documents.length,
-              }
-            : msg,
-        ),
-      )
-    } catch (error) {
-      // Update with error message
-      setChatMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === loadingMessage.id
-            ? {
-                ...msg,
-                content: "Failed to generate curation content. Please try again.",
-                isGenerating: false,
-                themes: ["Error"],
-              }
-            : msg,
-        ),
-      )
-    } finally {
-      setIsGeneratingCuration(false)
+      console.error('Failed to generate curation content:', error)
     }
   }
 
   const handleSummaryClick = async (summaryName: string) => {
     if (!summaryName.trim()) return // Don't process empty cards
-
-    setActiveSummary(summaryName)
-    setIsGeneratingSummary(true)
-
-    // On mobile, close sidebar after selection
-    if (isMobile) {
-      setSidebarOpen(false)
-    }
-
-    // Update the active state
-    setDynamicSummaries((prev) => prev.map((s) => ({ ...s, active: s.name === summaryName })))
-
-    const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-
-    // Add a loading message to chat
-    const loadingMessage = {
-      id: Date.now(),
-      type: "summary" as const,
-      content: "",
-      title:
-        summaryName === "Overall Summary"
-          ? "Overall Document Summary"
-          : summaryName === "Combined Summary"
-            ? "Combined Documents Summary"
-            : `${summaryName} Summary`,
-      isGenerating: true,
-      timestamp,
-    }
-    setChatMessages((prev) => [...prev, loadingMessage])
-
+    
     try {
-      let content = ""
-
-      if (summaryName === "Overall Summary" || summaryName === "Combined Summary") {
-        // Use the AI Summary service to create a custom summary
-        const result = await aiSummaryService.createCustomSummary({
-          title: summaryName === "Overall Summary" ? "Overall Document Analysis" : "Combined Documents Analysis",
-          description: summaryName === "Overall Summary" 
-            ? "Comprehensive overview of all uploaded documents with key insights and recommendations"
-            : "Synthesized analysis combining insights from all documents to identify patterns and strategic opportunities",
-          keywords: summaryName === "Overall Summary" 
-            ? ["overview", "analysis", "insights", "recommendations", "summary"]
-            : ["combined", "synthesis", "patterns", "strategic", "comprehensive"],
-          focusArea: summaryName === "Overall Summary"
-            ? "Executive summary and high-level insights across all documents"
-            : "Cross-document analysis and strategic synthesis",
-          provider: selectedProvider,
-          model: selectedModel
-        })
-
-        if (result.success && result.summary) {
-          content = result.summary.content
-        } else {
-          content = `Failed to generate ${summaryName.toLowerCase()}: ${result.message}`
-        }
-      } else {
-        // Generate summary for specific document using AI Summary service
-        const targetDoc = documents.find((doc) => {
-          const docName = doc.name.split(".")[0]
-          const shortName = docName.length > 12 ? docName.substring(0, 12) + "..." : docName
-          return shortName === summaryName || docName === summaryName
-        })
-
-        if (targetDoc) {
-          // Create a custom summary focused on this specific document
-          const result = await aiSummaryService.createCustomSummary({
-            title: `${targetDoc.name} Analysis`,
-            description: `Detailed analysis and summary of ${targetDoc.name}`,
-            keywords: targetDoc.themes?.slice(0, 5) || ["document", "analysis"],
-            focusArea: `Comprehensive analysis of ${targetDoc.name} including key insights, themes, and recommendations`,
-            provider: selectedProvider,
-            model: selectedModel
-          })
-
-          if (result.success && result.summary) {
-            content = result.summary.content
-          } else {
-            content = `Failed to generate summary for ${targetDoc.name}: ${result.message}`
-          }
-        } else {
-          // If no specific document found, create a general custom summary
-          console.log(`No specific document found for summary name: ${summaryName}. Creating general summary.`)
-          
-          const result = await aiSummaryService.createCustomSummary({
-            title: summaryName,
-            description: `Custom summary for ${summaryName}`,
-            keywords: ["analysis", "insights", "summary"],
-            focusArea: `Comprehensive analysis and insights for ${summaryName}`,
-            provider: selectedProvider,
-            model: selectedModel
-          })
-
-          if (result.success && result.summary) {
-            content = result.summary.content
-          } else {
-            content = `Failed to generate custom summary: ${result.message}`
-          }
-        }
-      }
-
-      // Update the message with the generated content
-      setChatMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === loadingMessage.id
-            ? {
-                ...msg,
-                content,
-                isGenerating: false,
-                themes:
-                  summaryName === "Overall Summary"
-                    ? ["AI Summary", "Overall Analysis", `${selectedProvider.toUpperCase()} Generated`]
-                    : summaryName === "Combined Summary"
-                      ? ["AI Summary", "Combined Analysis", `${selectedProvider.toUpperCase()} Generated`]
-                      : ["AI Summary", "Document Analysis", `${selectedProvider.toUpperCase()} Generated`],
-                documentsUsed:
-                  summaryName === "Overall Summary" || summaryName === "Combined Summary" ? documents.length : 1,
-              }
-            : msg,
-        ),
-      )
+      // FIXED: Always start a new conversation for each summary click
+      console.log('🆕 Vault: Starting new conversation for summary:', summaryName)
+      startNewConversation()
+      
+      await generateSummaryContent(summaryName)
     } catch (error) {
-      console.error("Summary generation error:", error)
-      // Update with error message
-      setChatMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === loadingMessage.id
-            ? {
-                ...msg,
-                content: `Failed to generate summary. Error: ${error instanceof Error ? error.message : "Unknown error"}. Please try again.`,
-                isGenerating: false,
-                themes: ["Error"],
-              }
-            : msg,
-        ),
-      )
-    } finally {
-      setIsGeneratingSummary(false)
+      console.error('Failed to generate summary content:', error)
     }
   }
 
-  const toggleSidebar = () => {
-    setSidebarOpen(!sidebarOpen)
-  }
-
-  const toggleSidebarExpansion = () => {
-    setSidebarExpanded(!sidebarExpanded)
-  }
-
-  // Functions to toggle Sources and Document Relevance visibility
-  const toggleSources = (messageId: number) => {
-    setExpandedSources(prev => {
-      const newSet = new Set(prev)
-      if (newSet.has(messageId)) {
-        newSet.delete(messageId)
-      } else {
-        newSet.add(messageId)
-      }
-      return newSet
-    })
-  }
-
-  const toggleRelevance = (messageId: number) => {
-    setExpandedRelevance(prev => {
-      const newSet = new Set(prev)
-      if (newSet.has(messageId)) {
-        newSet.delete(messageId)
-      } else {
-        newSet.add(messageId)
-      }
-      return newSet
-    })
+  const handleDeleteCuration = async (curationId: string) => {
+    try {
+      await deleteCuration(curationId)
+    } catch (error) {
+      console.error('Failed to delete curation:', error)
+    }
   }
 
   // Function to format content with better typography
@@ -841,10 +315,64 @@ function VaultPageContent() {
     return formattedContent
   }
 
+  const handleConversationSelect = (conversationId: string) => {
+    // Use the global state action
+    loadConversationHistory(conversationId)
+  }
+
+  const handleHistoryCardClick = async (conversation: any, messages: any[]) => {
+    // FIXED: Always start a new conversation for each history click
+    console.log('🆕 Vault: Starting new conversation for history item:', conversation.title)
+    startNewConversation()
+    
+    // Use preloaded data directly for instant loading - no API calls needed!
+    console.log(`⚡ VaultPage: Loading conversation ${conversation.id} instantly from preloaded data in new conversation`)
+    
+    // Convert messages to chat format instantly
+    const chatMessages = messages.map((msg: any, index: number) => ({
+      id: index,
+      type: msg.role === 'user' ? 'user' as const : 'ai' as const,
+      content: msg.content,
+      timestamp: msg.timestamp || new Date().toISOString(),
+      relevanceScores: msg.relevanceScores,
+      contextMode: msg.contextMode
+    }))
+    
+    // Set chat messages instantly in the new conversation - no loading delays!
+    dispatch({ type: 'SET_CHAT_MESSAGES', payload: chatMessages })
+    
+    console.log(`✅ VaultPage: Conversation ${conversation.id} loaded instantly with ${chatMessages.length} messages in new conversation`)
+    
+    // Keep the current active tab - don't force switch to curations
+    // This maintains the user's current view context
+  }
+
+  const handleNewConversation = () => {
+    // Use the global state action to start a new conversation
+    startNewConversation()
+    setActiveTab("curations") // Switch to main chat view
+  }
+
+  const handleSendMessage = async () => {
+    if (!inputMessage.trim()) return
+    
+    const messageToSend = inputMessage.trim()
+    // Clear input immediately for better UX
+    setInputMessage("")
+    
+    try {
+      await sendMessage(messageToSend)
+    } catch (error) {
+      console.error('Failed to send message:', error)
+      // Optionally restore the message if sending failed
+      // setInputMessage(messageToSend)
+    }
+  }
+
   return (
-    <div className="h-screen bg-white overflow-hidden relative">
-      {/* Beautiful flowing wave background */}
-      <div className="absolute inset-0">
+    <div className="h-screen bg-white overflow-hidden relative mobile-safe-top mobile-safe-bottom">
+      {/* Beautiful flowing wave background - Hidden on mobile for clean ChatGPT look */}
+      <div className="absolute inset-0 hidden md:block">
         <svg className="absolute inset-0 w-full h-full" viewBox="0 0 1440 800" preserveAspectRatio="xMidYMid slice">
           <defs>
             <linearGradient id="waveGradient1" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -908,13 +436,275 @@ function VaultPageContent() {
           </g>
         </svg>
       </div>
-      <div className="flex h-full relative z-10">
-        {/* Mobile Sidebar Overlay */}
-        {isMobile && sidebarOpen && (
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-20" onClick={() => setSidebarOpen(false)} />
-        )}
 
-        {/* Enhanced Left Sidebar */}
+      {/* Mobile: ChatGPT-style layout */}
+      <div className="md:hidden flex flex-col h-full bg-white relative z-10">
+        {/* Ultra-Minimal Mobile Header */}
+        <div className="flex-shrink-0 bg-white/95 backdrop-blur-xl border-b border-gray-100 shadow-sm">
+          <div className="flex items-center justify-between px-4 py-3 h-14">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={toggleSidebar}
+              className="p-2 hover:bg-gray-100 rounded-xl transition-colors"
+            >
+              <Menu className="h-5 w-5 text-gray-600" />
+            </Button>
+            
+            <div className="flex items-center space-x-2">
+              <div className="w-8 h-8">
+                <SixthvaultLogo size="small" />
+              </div>
+              <span className="text-lg font-semibold text-gray-800">SixthVault</span>
+            </div>
+            
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={toggleSidebarExpansion}
+              className="p-2 hover:bg-gray-100 rounded-xl transition-colors"
+            >
+              <Settings className="h-5 w-5 text-gray-600" />
+            </Button>
+          </div>
+        </div>
+
+        {/* Chat Area - 85% of screen */}
+        <div className="flex-1 overflow-auto bg-gray-50">
+          <div className="p-4 min-h-full">
+            {chatMessages.length === 0 && !isGeneratingCuration && !isGeneratingSummary && (
+              <div className="flex items-center justify-center min-h-[calc(100vh-200px)]">
+                <div className="text-center max-w-sm px-6">
+                  <div className="mx-auto w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mb-6">
+                    <MessageSquare className="w-8 h-8 text-gray-400" />
+                  </div>
+                  <h3 className="text-xl font-semibold mb-3 text-gray-800">
+                    How can I help you today?
+                  </h3>
+                  <p className="text-gray-500 text-sm">
+                    Ask questions about your documents or start a conversation
+                  </p>
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-4 pb-6">
+              {chatMessages.map((message) => (
+                <div key={message.id} className={`flex ${message.type === "user" ? "justify-end" : "justify-start"}`}>
+                  <div
+                    className={`max-w-[85%] rounded-2xl px-4 py-3 ${
+                      message.type === "user"
+                        ? "bg-blue-500 text-white ml-4"
+                        : "bg-white border border-gray-200 shadow-sm mr-4"
+                    }`}
+                  >
+                    {message.isGenerating ? (
+                      <div className="flex items-center space-x-2">
+                        <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
+                        <span className="text-gray-500 text-sm">Thinking...</span>
+                      </div>
+                    ) : (
+                      <div className={`text-sm leading-relaxed ${message.type === "user" ? "text-white" : "text-gray-800"}`}>
+                        {message.type === "user" ? (
+                          message.content
+                        ) : (
+                          <div
+                            dangerouslySetInnerHTML={{
+                              __html: formatContent(message.content),
+                            }}
+                          />
+                        )}
+                      </div>
+                    )}
+
+                    {/* Enhanced Metadata for AI responses - Mobile optimized */}
+                    {(message.type === "ai" || message.type === "curation" || message.type === "summary") &&
+                      !message.isGenerating && (
+                        <div className="mt-3 pt-3 border-t border-gray-100">
+                          <div className="flex flex-wrap gap-1 mb-2">
+                            {message.themes &&
+                              message.themes.slice(0, 2).map((theme, index) => (
+                                <Badge key={index} variant="secondary" className="text-xs bg-gray-100 text-gray-600">
+                                  {theme}
+                                </Badge>
+                              ))}
+                          </div>
+
+                          <div className="flex items-center justify-between text-xs text-gray-500">
+                            <div className="flex items-center space-x-1">
+                              <Brain className="w-3 h-3" />
+                              <span>{message.documentsUsed || 0} docs</span>
+                            </div>
+                            
+                            {message.documentNames && message.documentNames.length > 0 && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => toggleExpandedSources(message.id)}
+                                className="h-6 px-2 text-xs text-blue-600 hover:bg-blue-50"
+                              >
+                                <Eye className="w-3 h-3 mr-1" />
+                                Sources
+                                {expandedSources.has(message.id) ? (
+                                  <ChevronUp className="w-3 h-3 ml-1" />
+                                ) : (
+                                  <ChevronDown className="w-3 h-3 ml-1" />
+                                )}
+                              </Button>
+                            )}
+                          </div>
+
+                          {/* Mobile-optimized expandable sources */}
+                          {message.documentNames && message.documentNames.length > 0 && expandedSources.has(message.id) && (
+                            <div className="mt-3 pt-3 border-t border-gray-100">
+                              <div className="text-xs font-medium text-gray-600 mb-2">Sources:</div>
+                              <div className="space-y-1">
+                                {message.documentNames.slice(0, 3).map((name, index) => (
+                                  <div key={index} className="text-xs text-gray-500 bg-gray-50 rounded px-2 py-1">
+                                    {name}
+                                  </div>
+                                ))}
+                                {message.documentNames.length > 3 && (
+                                  <div className="text-xs text-gray-400">
+                                    +{message.documentNames.length - 3} more
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                  </div>
+                </div>
+              ))}
+
+              {(isGeneratingCuration || isGeneratingSummary) && (
+                <div className="flex justify-start">
+                  <div className="bg-white border border-gray-200 shadow-sm rounded-2xl px-4 py-3 mr-4">
+                    <div className="flex items-center space-x-2">
+                      <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+                      <span className="text-gray-600 text-sm">AI is thinking...</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Floating Input Area - 7% of screen */}
+        <div className="flex-shrink-0 bg-white border-t border-gray-100 p-4 pb-safe">
+          <div className="relative max-w-4xl mx-auto">
+            <div className="flex items-center space-x-3 bg-gray-100 rounded-full p-2">
+              <Input
+                value={inputMessage}
+                onChange={(e) => setInputMessage(e.target.value)}
+                onKeyPress={(e) => e.key === "Enter" && !e.shiftKey && handleSendMessage()}
+                placeholder="Message SixthVault..."
+                className="flex-1 bg-transparent border-none shadow-none focus:ring-0 text-sm placeholder:text-gray-500"
+                disabled={isGeneratingCuration || isGeneratingSummary}
+              />
+              <Button
+                size="sm"
+                onClick={handleSendMessage}
+                disabled={isGeneratingCuration || isGeneratingSummary || !inputMessage.trim()}
+                className="bg-blue-500 hover:bg-blue-600 text-white h-8 w-8 p-0 rounded-full flex-shrink-0"
+              >
+                {(isGeneratingCuration || isGeneratingSummary) ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {/* Mobile Slide-out Menu Overlay */}
+        {sidebarOpen && (
+          <div className="fixed inset-0 z-50 md:hidden">
+            <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" onClick={toggleSidebar} />
+            <div className="absolute left-0 top-0 bottom-0 w-80 bg-white shadow-xl overflow-auto">
+              <div className="p-4 border-b border-gray-200">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-semibold text-gray-800">Menu</h2>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={toggleSidebar}
+                    className="p-1"
+                  >
+                    <X className="h-5 w-5" />
+                  </Button>
+                </div>
+              </div>
+              
+              <div className="p-4 space-y-4">
+                {/* Quick Actions */}
+                <div>
+                  <h3 className="text-sm font-medium text-gray-600 mb-3">Quick Actions</h3>
+                  <div className="space-y-2">
+                    <Link href="/documents">
+                      <Button variant="ghost" className="w-full justify-start text-sm">
+                        <FileText className="w-4 h-4 mr-3" />
+                        Document Management
+                      </Button>
+                    </Link>
+                    <Button 
+                      onClick={logout}
+                      variant="ghost" 
+                      className="w-full justify-start text-sm text-red-600 hover:text-red-700 hover:bg-red-50"
+                    >
+                      <LogOut className="w-4 h-4 mr-3" />
+                      Logout
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Curations Preview */}
+                <div>
+                  <h3 className="text-sm font-medium text-gray-600 mb-3">AI Curations</h3>
+                  <div className="space-y-2">
+                    {[...customCurations, ...dynamicCurations].slice(0, 3).map((curation, index) => {
+                      const IconComponent = curation.icon
+                      return (
+                        <Button
+                          key={index}
+                          variant="ghost"
+                          onClick={() => {
+                            handleCurationClick(curation.title)
+                            toggleSidebar()
+                          }}
+                          className="w-full justify-start text-sm p-3 h-auto"
+                          disabled={documents.length === 0}
+                        >
+                          <IconComponent className="w-4 h-4 mr-3 flex-shrink-0" />
+                          <span className="truncate text-left">{curation.title}</span>
+                        </Button>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* Status */}
+                <div className="pt-4 border-t border-gray-200">
+                  <div className="flex items-center justify-between text-xs text-gray-500">
+                    <span>Documents: {documents.length}</span>
+                    <div className="flex items-center space-x-1">
+                      <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                      <span>Online</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Desktop: Keep original layout */}
+      <div className="hidden md:flex h-full relative z-10">
+        {/* Enhanced Left Sidebar with Tabs */}
         <div
           className={`${
             sidebarOpen ? "translate-x-0" : "-translate-x-full"
@@ -925,8 +715,8 @@ function VaultPageContent() {
           {/* Sidebar Header */}
           <div className="border-b border-slate-200/60 flex-shrink-0 bg-white relative">
             {sidebarExpanded ? (
-              <div className="w-full h-20 flex items-center justify-center p-2">
-                <SixthvaultLogo size="full" />
+              <div className="w-full h-32 flex items-center justify-center p-4">
+                <SixthvaultLogo size="section-fill" />
               </div>
             ) : (
               <div className="w-full h-16 flex items-center justify-center">
@@ -935,621 +725,688 @@ function VaultPageContent() {
             )}
             {/* Control buttons positioned absolutely */}
             <div className="absolute top-2 right-2 flex items-center space-x-2">
-              {!isMobile && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={toggleSidebarExpansion}
-                  className="text-slate-600 hover:bg-slate-100 h-8 w-8 p-0"
-                >
-                  {sidebarExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-                </Button>
-              )}
-              {isMobile && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setSidebarOpen(false)}
-                  className="text-slate-600 hover:bg-slate-100 h-8 w-8 p-0"
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={toggleSidebarExpansion}
+                className="text-slate-600 hover:bg-slate-100 h-8 w-8 p-0"
+              >
+                {sidebarExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              </Button>
             </div>
           </div>
 
           {sidebarExpanded && (
-            <div className="p-4 flex-1 overflow-auto">
-              {/* AI Curations Section */}
-              <Card className="mb-6 border-0 shadow-lg bg-white/95 backdrop-blur-xl relative overflow-hidden">
-                {/* Beautiful flowing wave background for curations */}
-                <div className="absolute inset-0 pointer-events-none">
-                  <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 400 200" preserveAspectRatio="xMidYMid slice">
-                    <defs>
-                      <linearGradient id="curationWave1" x1="0%" y1="0%" x2="100%" y2="100%">
-                        <stop offset="0%" stopColor="#e0f2fe" stopOpacity="0.3"/>
-                        <stop offset="50%" stopColor="#81d4fa" stopOpacity="0.2"/>
-                        <stop offset="100%" stopColor="#29b6f6" stopOpacity="0.1"/>
-                      </linearGradient>
-                      <linearGradient id="curationWave2" x1="100%" y1="0%" x2="0%" y2="100%">
-                        <stop offset="0%" stopColor="#f3e5f5" stopOpacity="0.2"/>
-                        <stop offset="50%" stopColor="#ce93d8" stopOpacity="0.15"/>
-                        <stop offset="100%" stopColor="#ab47bc" stopOpacity="0.1"/>
-                      </linearGradient>
-                    </defs>
-                    <g stroke="url(#curationWave1)" strokeWidth="1" fill="none" opacity="0.6">
-                      <path d="M0,50 Q100,30 200,45 T400,40"/>
-                      <path d="M0,70 Q120,50 240,65 T400,60"/>
-                    </g>
-                    <g stroke="url(#curationWave2)" strokeWidth="0.8" fill="none" opacity="0.5">
-                      <path d="M0,90 Q150,70 300,85 T400,80"/>
-                      <path d="M0,110 Q180,90 360,105 T400,100"/>
-                    </g>
-                    <path d="M0,80 Q100,60 200,75 T400,70 L400,200 L0,200 Z" fill="url(#curationWave1)" opacity="0.05"/>
-                    <path d="M0,120 Q150,100 300,115 T400,110 L400,200 L0,200 Z" fill="url(#curationWave2)" opacity="0.03"/>
-                  </svg>
-                </div>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-semibold text-slate-800 flex items-center">
-                    <Sparkles className="w-4 h-4 mr-2 text-purple-600" />
-                    AI CURATIONS
-                    <Badge variant="secondary" className="ml-2 text-xs bg-purple-100 text-purple-700">
-                      {dynamicCurations.length}
-                    </Badge>
-                    <Dialog open={showCustomCurationModal} onOpenChange={setShowCustomCurationModal}>
-                      <DialogTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="ml-auto h-6 w-6 p-0 text-purple-600 hover:bg-purple-100 hover:text-purple-700"
-                          disabled={documents.length === 0}
-                          title={documents.length === 0 ? "Upload documents to create custom curations" : "Create custom curation"}
-                        >
-                          <Plus className="h-4 w-4" />
-                        </Button>
-                      </DialogTrigger>
-                      <DialogContent className="sm:max-w-[500px]">
-                        <DialogHeader>
-                          <DialogTitle className="flex items-center">
-                            <div className="p-2 bg-purple-100 rounded-lg mr-3">
-                              <Sparkles className="w-5 h-5 text-purple-600" />
-                            </div>
-                            Create Custom AI Curation
-                          </DialogTitle>
-                          <DialogDescription>
-                            Create a custom AI curation based on your specific topic and keywords. The AI will analyze your documents and generate insights focused on your chosen theme.
-                          </DialogDescription>
-                        </DialogHeader>
-                        <div className="grid gap-4 py-4">
-                          <div className="grid gap-2">
-                            <Label htmlFor="title" className="text-sm font-medium">
-                              Curation Title *
-                            </Label>
-                            <Input
-                              id="title"
-                              placeholder="e.g., Market Trends Analysis, Customer Insights, Technology Innovation..."
-                              value={customCurationTitle}
-                              onChange={(e) => setCustomCurationTitle(e.target.value)}
-                              className="col-span-3"
-                            />
-                          </div>
-                          <div className="grid gap-2">
-                            <Label htmlFor="description" className="text-sm font-medium">
-                              Description (Optional)
-                            </Label>
-                            <Textarea
-                              id="description"
-                              placeholder="Describe what specific insights or analysis you want to focus on..."
-                              value={customCurationDescription}
-                              onChange={(e) => setCustomCurationDescription(e.target.value)}
-                              className="col-span-3 min-h-[80px]"
-                            />
-                          </div>
-                          <div className="grid gap-2">
-                            <Label htmlFor="keywords" className="text-sm font-medium">
-                              Keywords & Topics *
-                            </Label>
-                            <Input
-                              id="keywords"
-                              placeholder="e.g., market research, consumer behavior, digital transformation (comma-separated)"
-                              value={customCurationKeywords}
-                              onChange={(e) => setCustomCurationKeywords(e.target.value)}
-                              className="col-span-3"
-                            />
-                            <p className="text-xs text-slate-500">
-                              Enter keywords separated by commas. These will guide the AI analysis.
-                            </p>
-                          </div>
-                          <div className="grid gap-2">
-                            <Label className="text-sm font-medium">AI Provider & Model</Label>
-                            <div className="flex items-center space-x-2 p-3 bg-slate-50 rounded-lg">
-                              <div className="p-1 bg-blue-100 rounded">
-                                <Brain className="w-4 h-4 text-blue-600" />
+            <div className="flex-1 overflow-hidden">
+              {/* Professional Dropdown Navigation */}
+              <div className="p-4 border-b border-slate-200/60">
+                <Select value={activeTab} onValueChange={setActiveTab}>
+                  <SelectTrigger className="w-full bg-white border-slate-200 rounded-lg h-10 text-sm hover:border-slate-300 transition-colors">
+                    <SelectValue>
+                      <div className="flex items-center">
+                        {activeTab === "curations" && (
+                          <>
+                            <Sparkles className="w-4 h-4 mr-2 text-purple-600" />
+                            AI Curations
+                          </>
+                        )}
+                        {activeTab === "summaries" && (
+                          <>
+                            <Brain className="w-4 h-4 mr-2 text-emerald-600" />
+                            AI Summaries
+                          </>
+                        )}
+                        {activeTab === "history" && (
+                          <>
+                            <History className="w-4 h-4 mr-2 text-blue-600" />
+                            Chat History
+                          </>
+                        )}
+                      </div>
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="curations">
+                      <div className="flex items-center">
+                        <Sparkles className="w-4 h-4 mr-2 text-purple-600" />
+                        AI Curations
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="summaries">
+                      <div className="flex items-center">
+                        <Brain className="w-4 h-4 mr-2 text-emerald-600" />
+                        AI Summaries
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="history">
+                      <div className="flex items-center">
+                        <History className="w-4 h-4 mr-2 text-blue-600" />
+                        Chat History
+                      </div>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="flex-1 overflow-hidden">
+                {activeTab === "curations" && (
+                  <div className="flex-1 overflow-auto px-4 pb-4">
+                    <Card className="border-0 shadow-lg bg-white/95 backdrop-blur-xl relative overflow-hidden">
+                    {/* Beautiful flowing wave background for curations */}
+                    <div className="absolute inset-0 pointer-events-none">
+                      <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 400 200" preserveAspectRatio="xMidYMid slice">
+                        <defs>
+                          <linearGradient id="curationWave1" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stopColor="#e0f2fe" stopOpacity="0.3"/>
+                            <stop offset="50%" stopColor="#81d4fa" stopOpacity="0.2"/>
+                            <stop offset="100%" stopColor="#29b6f6" stopOpacity="0.1"/>
+                          </linearGradient>
+                          <linearGradient id="curationWave2" x1="100%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#f3e5f5" stopOpacity="0.2"/>
+                            <stop offset="50%" stopColor="#ce93d8" stopOpacity="0.15"/>
+                            <stop offset="100%" stopColor="#ab47bc" stopOpacity="0.1"/>
+                          </linearGradient>
+                        </defs>
+                        <g stroke="url(#curationWave1)" strokeWidth="1" fill="none" opacity="0.6">
+                          <path d="M0,50 Q100,30 200,45 T400,40"/>
+                          <path d="M0,70 Q120,50 240,65 T400,60"/>
+                        </g>
+                        <g stroke="url(#curationWave2)" strokeWidth="0.8" fill="none" opacity="0.5">
+                          <path d="M0,90 Q150,70 300,85 T400,80"/>
+                          <path d="M0,110 Q180,90 360,105 T400,100"/>
+                        </g>
+                        <path d="M0,80 Q100,60 200,75 T400,70 L400,200 L0,200 Z" fill="url(#curationWave1)" opacity="0.05"/>
+                        <path d="M0,120 Q150,100 300,115 T400,110 L400,200 L0,200 Z" fill="url(#curationWave2)" opacity="0.03"/>
+                      </svg>
+                    </div>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm font-semibold text-slate-800 flex items-center">
+                        <Sparkles className="w-4 h-4 mr-2 text-purple-600" />
+                        AI CURATIONS
+                        <Badge variant="secondary" className="ml-2 text-xs bg-purple-100 text-purple-700">
+                          {customCurations.length + dynamicCurations.length}
+                        </Badge>
+                        <Dialog open={showCustomCurationModal} onOpenChange={setShowCustomCurationModal}>
+                          <DialogTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="ml-auto h-6 w-6 p-0 text-purple-600 hover:bg-purple-100 hover:text-purple-700"
+                              disabled={documents.length === 0}
+                              title={documents.length === 0 ? "Upload documents to create custom curations" : "Create custom curation"}
+                            >
+                              <Plus className="h-4 w-4" />
+                            </Button>
+                          </DialogTrigger>
+                          <DialogContent className="sm:max-w-[500px]">
+                            <DialogHeader>
+                              <DialogTitle className="flex items-center">
+                                <div className="p-2 bg-purple-100 rounded-lg mr-3">
+                                  <Sparkles className="w-5 h-5 text-purple-600" />
+                                </div>
+                                Create Custom AI Curation
+                              </DialogTitle>
+                              <DialogDescription>
+                                Create a custom AI curation based on your specific topic and keywords. The AI will analyze your documents and generate insights focused on your chosen theme.
+                              </DialogDescription>
+                            </DialogHeader>
+                            <div className="grid gap-4 py-4">
+                              <div className="grid gap-2">
+                                <Label htmlFor="title" className="text-sm font-medium">
+                                  Curation Title *
+                                </Label>
+                                <Input
+                                  id="title"
+                                  placeholder="e.g., Market Trends Analysis, Customer Insights, Technology Innovation..."
+                                  value={customCurationTitle}
+                                  onChange={(e) => setCustomCurationTitle(e.target.value)}
+                                  className="col-span-3"
+                                />
                               </div>
-                              <div className="flex-1">
-                                <p className="text-sm font-medium text-slate-700">
-                                  {modelProviders.find(p => p.name === selectedProvider)?.displayName || selectedProvider}
-                                </p>
+                              <div className="grid gap-2">
+                                <Label htmlFor="description" className="text-sm font-medium">
+                                  Description (Optional)
+                                </Label>
+                                <Textarea
+                                  id="description"
+                                  placeholder="Describe what specific insights or analysis you want to focus on..."
+                                  value={customCurationDescription}
+                                  onChange={(e) => setCustomCurationDescription(e.target.value)}
+                                  className="col-span-3 min-h-[80px]"
+                                />
+                              </div>
+                              <div className="grid gap-2">
+                                <Label htmlFor="keywords" className="text-sm font-medium">
+                                  Keywords & Topics *
+                                </Label>
+                                <Input
+                                  id="keywords"
+                                  placeholder="e.g., market research, consumer behavior, digital transformation (comma-separated)"
+                                  value={customCurationKeywords}
+                                  onChange={(e) => setCustomCurationKeywords(e.target.value)}
+                                  className="col-span-3"
+                                />
                                 <p className="text-xs text-slate-500">
-                                  {availableModels.find(m => m.name === selectedModel)?.displayName || selectedModel}
+                                  Enter keywords separated by commas. These will guide the AI analysis.
                                 </p>
                               </div>
-                              <Badge variant="outline" className="text-xs">
-                                {availableModels.find(m => m.name === selectedModel)?.isLocal ? 'Local' : 'Cloud'}
-                              </Badge>
+                              <div className="grid gap-2">
+                                <Label className="text-sm font-medium">AI Provider & Model</Label>
+                                <div className="flex items-center space-x-2 p-3 bg-slate-50 rounded-lg">
+                                  <div className="p-1 bg-blue-100 rounded">
+                                    <Brain className="w-4 h-4 text-blue-600" />
+                                  </div>
+                                  <div className="flex-1">
+                                    <p className="text-sm font-medium text-slate-700">
+                                      {modelProviders.find(p => p.name === selectedProvider)?.displayName || selectedProvider}
+                                    </p>
+                                    <p className="text-xs text-slate-500">
+                                      {availableModels.find(m => m.name === selectedModel)?.displayName || selectedModel}
+                                    </p>
+                                  </div>
+                                  <Badge variant="outline" className="text-xs">
+                                    {availableModels.find(m => m.name === selectedModel)?.isLocal ? 'Local' : 'Cloud'}
+                                  </Badge>
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                        </div>
-                        <DialogFooter>
-                          <Button
-                            variant="outline"
-                            onClick={() => {
-                              setShowCustomCurationModal(false)
-                              setCustomCurationTitle("")
-                              setCustomCurationDescription("")
-                              setCustomCurationKeywords("")
-                            }}
-                            disabled={isCreatingCustomCuration}
-                          >
-                            Cancel
-                          </Button>
-                          <Button
-                            onClick={async () => {
-                              if (!customCurationTitle.trim() || !customCurationKeywords.trim()) {
-                                return
-                              }
-                              
-                              setIsCreatingCustomCuration(true)
-                              
-                              try {
-                                const keywords = customCurationKeywords.split(',').map(k => k.trim()).filter(k => k.length > 0)
-                                
-                                const result = await aiCurationService.createCustomCuration(
-                                  customCurationTitle.trim(),
-                                  customCurationDescription.trim(),
-                                  keywords,
-                                  selectedProvider,
-                                  selectedModel
-                                )
-                                
-                                if (result.success) {
-                                  // Close modal and reset form
+                            <DialogFooter>
+                              <Button
+                                variant="outline"
+                                onClick={() => {
                                   setShowCustomCurationModal(false)
                                   setCustomCurationTitle("")
                                   setCustomCurationDescription("")
                                   setCustomCurationKeywords("")
-                                  
-                                  // Refresh curations to show the new one
-                                  // The AI curation service will handle refreshing the local data
-                                  
-                                  // Optionally trigger a click on the new curation
-                                  if (result.curation) {
-                                    setTimeout(() => {
-                                      handleCurationClick(result.curation!.title)
-                                    }, 1000)
+                                }}
+                                disabled={isCreatingCustomCuration}
+                              >
+                                Cancel
+                              </Button>
+                              <Button
+                                onClick={async () => {
+                                  if (!customCurationTitle.trim() || !customCurationKeywords.trim()) {
+                                    return
                                   }
-                                } else {
-                                  console.error('Failed to create custom curation:', result.message)
-                                  // Could show a toast notification here
-                                }
-                              } catch (error) {
-                                console.error('Error creating custom curation:', error)
-                              } finally {
-                                setIsCreatingCustomCuration(false)
-                              }
-                            }}
-                            disabled={!customCurationTitle.trim() || !customCurationKeywords.trim() || isCreatingCustomCuration}
-                            className="bg-purple-600 hover:bg-purple-700"
-                          >
-                            {isCreatingCustomCuration ? (
-                              <>
-                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                                Creating...
-                              </>
-                            ) : (
-                              <>
-                                <Sparkles className="w-4 h-4 mr-2" />
-                                Create Curation
-                              </>
-                            )}
-                          </Button>
-                        </DialogFooter>
-                      </DialogContent>
-                    </Dialog>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="pt-0">
-                  <div className="grid grid-cols-1 gap-3">
-                    {dynamicCurations.length === 0 ? (
-                      <div className="text-center py-8">
-                        <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center mx-auto mb-4">
-                          <Sparkles className="w-6 h-6 text-purple-400" />
+                                  
+                                  setIsCreatingCustomCuration(true)
+                                  
+                                  try {
+                                    const keywords = customCurationKeywords.split(',').map(k => k.trim()).filter(k => k.length > 0)
+                                    
+                                    await createCustomCuration(
+                                      customCurationTitle.trim(),
+                                      customCurationDescription.trim(),
+                                      keywords
+                                    )
+                                    
+                                    // Close modal and reset form
+                                    setShowCustomCurationModal(false)
+                                    setCustomCurationTitle("")
+                                    setCustomCurationDescription("")
+                                    setCustomCurationKeywords("")
+                                    
+                                    // Auto-trigger content generation for the new curation
+                                    handleCurationClick(customCurationTitle.trim())
+                                  } catch (error) {
+                                    console.error('Error creating custom curation:', error)
+                                  } finally {
+                                    setIsCreatingCustomCuration(false)
+                                  }
+                                }}
+                                disabled={!customCurationTitle.trim() || !customCurationKeywords.trim() || isCreatingCustomCuration}
+                                className="bg-purple-600 hover:bg-purple-700"
+                              >
+                                {isCreatingCustomCuration ? (
+                                  <>
+                                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                    Creating...
+                                  </>
+                                ) : (
+                                  <>
+                                    <Sparkles className="w-4 h-4 mr-2" />
+                                    Create Curation
+                                  </>
+                                )}
+                              </Button>
+                            </DialogFooter>
+                          </DialogContent>
+                        </Dialog>
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="pt-0">
+                      {/* Scrollable container for AI Curation cards */}
+                      <div className="max-h-96 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-300 scrollbar-track-slate-100 hover:scrollbar-thumb-slate-400 pr-2">
+                        <div className="grid grid-cols-1 gap-3">
+                          {/* Combine dynamic curations and custom curations */}
+                          {[...customCurations, ...dynamicCurations].length === 0 ? (
+                            <div className="text-center py-8">
+                              <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center mx-auto mb-4">
+                                <Sparkles className="w-6 h-6 text-purple-400" />
+                              </div>
+                              <p className="text-sm text-slate-600 mb-2">No AI curations available</p>
+                              <p className="text-xs text-slate-500">Upload documents to generate intelligent curations</p>
+                            </div>
+                          ) : (
+                            [...customCurations, ...dynamicCurations].map((curation, index) => {
+                              const IconComponent = curation.icon
+                              const isCustomCuration = customCurations.includes(curation)
+                              return (
+                                <div
+                                  key={`${isCustomCuration ? 'custom' : 'dynamic'}-${index}`}
+                                  className={`group relative cursor-pointer border rounded-lg transition-all duration-200 py-2 px-3 transform hover:scale-[1.02] active:scale-[0.98] active:shadow-lg ${
+                                    curation.active
+                                      ? "border-blue-200 bg-blue-50 shadow-md"
+                                      : documents.length === 0
+                                      ? "border-gray-200 bg-gray-50 cursor-not-allowed opacity-60"
+                                      : "border-gray-200 bg-white hover:border-blue-300 hover:shadow-md hover:bg-blue-50/30"
+                                  } ${isGeneratingCuration || documents.length === 0 ? "pointer-events-none" : ""}`}
+                                >
+                                  <div className="flex items-center justify-between">
+                                    <div 
+                                      className="flex items-center space-x-3 flex-1 min-w-0"
+                                      onClick={() => handleCurationClick(curation.title)}
+                                    >
+                                      <IconComponent className={`w-4 h-4 flex-shrink-0 ${
+                                        curation.active ? "text-blue-600" : "text-gray-500"
+                                      }`} />
+                                      <span className={`text-sm truncate ${
+                                        curation.active ? "text-blue-900 font-medium" : "text-gray-700"
+                                      }`}>
+                                        {curation.title}
+                                      </span>
+                                    </div>
+                                    
+                                    <Popover>
+                                      <PopoverTrigger asChild>
+                                        <Button
+                                          variant="ghost"
+                                          size="sm"
+                                          className="opacity-0 group-hover:opacity-100 h-6 w-6 p-0 text-gray-400 hover:text-gray-600"
+                                          onClick={(e) => e.stopPropagation()}
+                                        >
+                                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16">
+                                            <circle cx="2" cy="8" r="1.5"/>
+                                            <circle cx="8" cy="8" r="1.5"/>
+                                            <circle cx="14" cy="8" r="1.5"/>
+                                          </svg>
+                                        </Button>
+                                      </PopoverTrigger>
+                                      <PopoverContent className="w-40 p-1" align="end">
+                                        <div className="space-y-1">
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="w-full justify-start text-xs h-8"
+                                            onClick={() => {
+                                              // Share functionality
+                                              navigator.clipboard.writeText(`AI Curation: ${curation.title}`)
+                                            }}
+                                          >
+                                            <Share2 className="w-3 h-3 mr-2" />
+                                            Share
+                                          </Button>
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="w-full justify-start text-xs h-8"
+                                            onClick={() => {
+                                              // Rename functionality (placeholder)
+                                              const newName = prompt("Enter new name:", curation.title)
+                                              if (newName && newName.trim()) {
+                                                console.log("Rename to:", newName)
+                                              }
+                                            }}
+                                          >
+                                            <svg className="w-3 h-3 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                            </svg>
+                                            Rename
+                                          </Button>
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="w-full justify-start text-xs h-8 text-red-600 hover:text-red-700 hover:bg-red-50"
+                                            onClick={() => handleDeleteCuration(curation.id)}
+                                          >
+                                            <X className="w-3 h-3 mr-2" />
+                                            Delete
+                                          </Button>
+                                        </div>
+                                      </PopoverContent>
+                                    </Popover>
+                                  </div>
+                                </div>
+                              )
+                            })
+                          )}
                         </div>
-                        <p className="text-sm text-slate-600 mb-2">No AI curations available</p>
-                        <p className="text-xs text-slate-500">Upload documents to generate intelligent curations</p>
                       </div>
-                    ) : (
-                      dynamicCurations.map((curation, index) => {
-                        const IconComponent = curation.icon
-                        return (
-                          <div
-                            key={index}
-                            onClick={() => handleCurationClick(curation.title)}
-                            className={`group relative overflow-hidden rounded-xl border transition-all duration-300 cursor-pointer ${
-                              curation.active
-                                ? "bg-gradient-to-br from-purple-50 via-indigo-50 to-blue-50 border-purple-200 shadow-lg ring-2 ring-purple-100"
-                                : documents.length === 0
-                                ? "bg-slate-50/80 border-slate-200 cursor-not-allowed opacity-60"
-                                : "bg-white/90 border-slate-200 hover:border-purple-200 hover:shadow-md hover:bg-gradient-to-br hover:from-purple-25 hover:to-indigo-25"
-                            } ${isGeneratingCuration || documents.length === 0 ? "pointer-events-none" : ""}`}
-                          >
-                            {/* Subtle gradient overlay */}
-                            <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent pointer-events-none" />
-                            
-                            {/* Content */}
-                            <div className="relative p-4">
-                              <div className="flex items-start space-x-3">
-                                <div className={`p-3 rounded-xl transition-all duration-200 ${
-                                  curation.active 
-                                    ? "bg-gradient-to-br from-purple-100 to-indigo-100 shadow-sm" 
-                                    : "bg-gradient-to-br from-slate-100 to-slate-50 group-hover:from-purple-50 group-hover:to-indigo-50"
-                                }`}>
-                                  <IconComponent className={`w-5 h-5 transition-colors duration-200 ${
-                                    curation.active ? "text-purple-600" : "text-slate-600 group-hover:text-purple-600"
-                                  }`} />
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <h4 className={`text-sm font-semibold leading-tight mb-1 transition-colors duration-200 ${
-                                    curation.active ? "text-purple-800" : "text-slate-800 group-hover:text-purple-700"
-                                  }`} style={{ wordBreak: 'break-word', overflowWrap: 'break-word' }}>
-                                    {curation.title}
-                                  </h4>
-                                  <p className={`text-xs transition-colors duration-200 ${
-                                    curation.active ? "text-purple-600" : "text-slate-500 group-hover:text-purple-500"
-                                  }`}>
-                                    AI-powered insights
-                                  </p>
-                                </div>
-                              </div>
-                              
-                              {/* Active indicator */}
-                              {curation.active && (
-                                <div className="absolute top-2 right-2">
-                                  <div className="w-2 h-2 bg-purple-500 rounded-full animate-pulse" />
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        )
-                      })
-                    )}
+                    </CardContent>
+                  </Card>
                   </div>
-                </CardContent>
-              </Card>
+                )}
 
-              {/* AI Summaries Section */}
-              <Card className="mb-6 border-0 shadow-lg bg-white/95 backdrop-blur-xl relative overflow-hidden">
-                {/* Beautiful flowing wave background for summaries */}
-                <div className="absolute inset-0 pointer-events-none">
-                  <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 400 200" preserveAspectRatio="xMidYMid slice">
-                    <defs>
-                      <linearGradient id="summaryWave1" x1="0%" y1="0%" x2="100%" y2="100%">
-                        <stop offset="0%" stopColor="#e0f2fe" stopOpacity="0.3"/>
-                        <stop offset="50%" stopColor="#81d4fa" stopOpacity="0.2"/>
-                        <stop offset="100%" stopColor="#29b6f6" stopOpacity="0.1"/>
-                      </linearGradient>
-                      <linearGradient id="summaryWave2" x1="100%" y1="0%" x2="0%" y2="100%">
-                        <stop offset="0%" stopColor="#fff3e0" stopOpacity="0.2"/>
-                        <stop offset="50%" stopColor="#ffcc80" stopOpacity="0.15"/>
-                        <stop offset="100%" stopColor="#ffa726" stopOpacity="0.1"/>
-                      </linearGradient>
-                    </defs>
-                    <g stroke="url(#summaryWave1)" strokeWidth="1" fill="none" opacity="0.6">
-                      <path d="M0,50 Q100,30 200,45 T400,40"/>
-                      <path d="M0,70 Q120,50 240,65 T400,60"/>
-                    </g>
-                    <g stroke="url(#summaryWave2)" strokeWidth="0.8" fill="none" opacity="0.5">
-                      <path d="M0,90 Q150,70 300,85 T400,80"/>
-                      <path d="M0,110 Q180,90 360,105 T400,100"/>
-                    </g>
-                    <path d="M0,80 Q100,60 200,75 T400,70 L400,200 L0,200 Z" fill="url(#summaryWave1)" opacity="0.05"/>
-                    <path d="M0,120 Q150,100 300,115 T400,110 L400,200 L0,200 Z" fill="url(#summaryWave2)" opacity="0.03"/>
-                  </svg>
-                </div>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-semibold text-slate-800 flex items-center">
-                    <Brain className="w-4 h-4 mr-2 text-emerald-600" />
-                    AI SUMMARIES
-                    <Badge variant="secondary" className="ml-2 text-xs bg-emerald-100 text-emerald-700">
-                      {dynamicSummaries.length}
-                    </Badge>
-                    <Dialog open={showCustomSummaryModal} onOpenChange={setShowCustomSummaryModal}>
-                      <DialogTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="ml-auto h-6 w-6 p-0 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700"
-                          disabled={documents.length === 0}
-                          title={documents.length === 0 ? "Upload documents to create custom summaries" : "Create custom summary"}
-                        >
-                          <Plus className="h-4 w-4" />
-                        </Button>
-                      </DialogTrigger>
-                      <DialogContent className="sm:max-w-[500px]">
-                        <DialogHeader>
-                          <DialogTitle className="flex items-center">
-                            <div className="p-2 bg-emerald-100 rounded-lg mr-3">
-                              <Brain className="w-5 h-5 text-emerald-600" />
-                            </div>
-                            Create Custom AI Summary
-                          </DialogTitle>
-                          <DialogDescription>
-                            Create a custom AI summary with your specific focus and keywords. The AI will analyze your documents and generate a targeted summary based on your requirements.
-                          </DialogDescription>
-                        </DialogHeader>
-                        <div className="grid gap-4 py-4">
-                          <div className="grid gap-2">
-                            <Label htmlFor="summary-title" className="text-sm font-medium">
-                              Summary Title *
-                            </Label>
-                            <Input
-                              id="summary-title"
-                              placeholder="e.g., Executive Summary, Technical Analysis, Market Overview..."
-                              value={customSummaryTitle}
-                              onChange={(e) => setCustomSummaryTitle(e.target.value)}
-                              className="col-span-3"
-                            />
-                          </div>
-                          <div className="grid gap-2">
-                            <Label htmlFor="summary-description" className="text-sm font-medium">
-                              Description (Optional)
-                            </Label>
-                            <Textarea
-                              id="summary-description"
-                              placeholder="Describe what specific aspects you want the summary to focus on..."
-                              value={customSummaryDescription}
-                              onChange={(e) => setCustomSummaryDescription(e.target.value)}
-                              className="col-span-3 min-h-[80px]"
-                            />
-                          </div>
-                          <div className="grid gap-2">
-                            <Label htmlFor="summary-keywords" className="text-sm font-medium">
-                              Keywords & Topics *
-                            </Label>
-                            <Input
-                              id="summary-keywords"
-                              placeholder="e.g., key findings, recommendations, trends, insights (comma-separated)"
-                              value={customSummaryKeywords}
-                              onChange={(e) => setCustomSummaryKeywords(e.target.value)}
-                              className="col-span-3"
-                            />
-                            <p className="text-xs text-slate-500">
-                              Enter keywords separated by commas. These will guide the summary focus.
-                            </p>
-                          </div>
-                          <div className="grid gap-2">
-                            <Label htmlFor="summary-focus" className="text-sm font-medium">
-                              Focus Area (Optional)
-                            </Label>
-                            <Input
-                              id="summary-focus"
-                              placeholder="e.g., business implications, technical details, strategic recommendations..."
-                              value={customSummaryFocusArea}
-                              onChange={(e) => setCustomSummaryFocusArea(e.target.value)}
-                              className="col-span-3"
-                            />
-                            <p className="text-xs text-slate-500">
-                              Specify the main focus or perspective for the summary.
-                            </p>
-                          </div>
-                          <div className="grid gap-2">
-                            <Label className="text-sm font-medium">AI Provider & Model</Label>
-                            <div className="flex items-center space-x-2 p-3 bg-slate-50 rounded-lg">
-                              <div className="p-1 bg-emerald-100 rounded">
-                                <Brain className="w-4 h-4 text-emerald-600" />
+                {/* AI Summaries Tab */}
+                {activeTab === "summaries" && (
+                  <div className="flex-1 overflow-auto px-4 pb-4">
+                  <Card className="border-0 shadow-lg bg-white/95 backdrop-blur-xl relative overflow-hidden">
+                    {/* Beautiful flowing wave background for summaries */}
+                    <div className="absolute inset-0 pointer-events-none">
+                      <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 400 200" preserveAspectRatio="xMidYMid slice">
+                        <defs>
+                          <linearGradient id="summaryWave1" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stopColor="#e0f2fe" stopOpacity="0.3"/>
+                            <stop offset="50%" stopColor="#81d4fa" stopOpacity="0.2"/>
+                            <stop offset="100%" stopColor="#29b6f6" stopOpacity="0.1"/>
+                          </linearGradient>
+                          <linearGradient id="summaryWave2" x1="100%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#fff3e0" stopOpacity="0.2"/>
+                            <stop offset="50%" stopColor="#ffcc80" stopOpacity="0.15"/>
+                            <stop offset="100%" stopColor="#ffa726" stopOpacity="0.1"/>
+                          </linearGradient>
+                        </defs>
+                        <g stroke="url(#summaryWave1)" strokeWidth="1" fill="none" opacity="0.6">
+                          <path d="M0,50 Q100,30 200,45 T400,40"/>
+                          <path d="M0,70 Q120,50 240,65 T400,60"/>
+                        </g>
+                        <g stroke="url(#summaryWave2)" strokeWidth="0.8" fill="none" opacity="0.5">
+                          <path d="M0,90 Q150,70 300,85 T400,80"/>
+                          <path d="M0,110 Q180,90 360,105 T400,100"/>
+                        </g>
+                        <path d="M0,80 Q100,60 200,75 T400,70 L400,200 L0,200 Z" fill="url(#summaryWave1)" opacity="0.05"/>
+                        <path d="M0,120 Q150,100 300,115 T400,110 L400,200 L0,200 Z" fill="url(#summaryWave2)" opacity="0.03"/>
+                      </svg>
+                    </div>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm font-semibold text-slate-800 flex items-center">
+                        <Brain className="w-4 h-4 mr-2 text-emerald-600" />
+                        AI SUMMARIES
+                        <Badge variant="secondary" className="ml-2 text-xs bg-emerald-100 text-emerald-700">
+                          {dynamicSummaries.length}
+                        </Badge>
+                        <Dialog open={showCustomSummaryModal} onOpenChange={setShowCustomSummaryModal}>
+                          <DialogTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="ml-auto h-6 w-6 p-0 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700"
+                              disabled={documents.length === 0}
+                              title={documents.length === 0 ? "Upload documents to create custom summaries" : "Create custom summary"}
+                            >
+                              <Plus className="h-4 w-4" />
+                            </Button>
+                          </DialogTrigger>
+                          <DialogContent className="sm:max-w-[500px]">
+                            <DialogHeader>
+                              <DialogTitle className="flex items-center">
+                                <div className="p-2 bg-emerald-100 rounded-lg mr-3">
+                                  <Brain className="w-5 h-5 text-emerald-600" />
+                                </div>
+                                Create Custom AI Summary
+                              </DialogTitle>
+                              <DialogDescription>
+                                Create a custom AI summary with your specific focus and keywords. The AI will analyze your documents and generate a targeted summary based on your requirements.
+                              </DialogDescription>
+                            </DialogHeader>
+                            <div className="grid gap-4 py-4">
+                              <div className="grid gap-2">
+                                <Label htmlFor="summary-title" className="text-sm font-medium">
+                                  Summary Title *
+                                </Label>
+                                <Input
+                                  id="summary-title"
+                                  placeholder="e.g., Executive Summary, Technical Analysis, Market Overview..."
+                                  value={customSummaryTitle}
+                                  onChange={(e) => setCustomSummaryTitle(e.target.value)}
+                                  className="col-span-3"
+                                />
                               </div>
-                              <div className="flex-1">
-                                <p className="text-sm font-medium text-slate-700">
-                                  {modelProviders.find(p => p.name === selectedProvider)?.displayName || selectedProvider}
-                                </p>
+                              <div className="grid gap-2">
+                                <Label htmlFor="summary-description" className="text-sm font-medium">
+                                  Description (Optional)
+                                </Label>
+                                <Textarea
+                                  id="summary-description"
+                                  placeholder="Describe what specific aspects you want the summary to focus on..."
+                                  value={customSummaryDescription}
+                                  onChange={(e) => setCustomSummaryDescription(e.target.value)}
+                                  className="col-span-3 min-h-[80px]"
+                                />
+                              </div>
+                              <div className="grid gap-2">
+                                <Label htmlFor="summary-keywords" className="text-sm font-medium">
+                                  Keywords & Topics *
+                                </Label>
+                                <Input
+                                  id="summary-keywords"
+                                  placeholder="e.g., key findings, recommendations, trends, insights (comma-separated)"
+                                  value={customSummaryKeywords}
+                                  onChange={(e) => setCustomSummaryKeywords(e.target.value)}
+                                  className="col-span-3"
+                                />
                                 <p className="text-xs text-slate-500">
-                                  {availableModels.find(m => m.name === selectedModel)?.displayName || selectedModel}
+                                  Enter keywords separated by commas. These will guide the summary focus.
                                 </p>
                               </div>
-                              <Badge variant="outline" className="text-xs">
-                                {availableModels.find(m => m.name === selectedModel)?.isLocal ? 'Local' : 'Cloud'}
-                              </Badge>
+                              <div className="grid gap-2">
+                                <Label htmlFor="summary-focus" className="text-sm font-medium">
+                                  Focus Area (Optional)
+                                </Label>
+                                <Input
+                                  id="summary-focus"
+                                  placeholder="e.g., business implications, technical details, strategic recommendations..."
+                                  value={customSummaryFocusArea}
+                                  onChange={(e) => setCustomSummaryFocusArea(e.target.value)}
+                                  className="col-span-3"
+                                />
+                                <p className="text-xs text-slate-500">
+                                  Specify the main focus or perspective for the summary.
+                                </p>
+                              </div>
+                              <div className="grid gap-2">
+                                <Label className="text-sm font-medium">AI Provider & Model</Label>
+                                <div className="flex items-center space-x-2 p-3 bg-slate-50 rounded-lg">
+                                  <div className="p-1 bg-emerald-100 rounded">
+                                    <Brain className="w-4 h-4 text-emerald-600" />
+                                  </div>
+                                  <div className="flex-1">
+                                    <p className="text-sm font-medium text-slate-700">
+                                      {modelProviders.find(p => p.name === selectedProvider)?.displayName || selectedProvider}
+                                    </p>
+                                    <p className="text-xs text-slate-500">
+                                      {availableModels.find(m => m.name === selectedModel)?.displayName || selectedModel}
+                                    </p>
+                                  </div>
+                                  <Badge variant="outline" className="text-xs">
+                                    {availableModels.find(m => m.name === selectedModel)?.isLocal ? 'Local' : 'Cloud'}
+                                  </Badge>
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                        </div>
-                        <DialogFooter>
-                          <Button
-                            variant="outline"
-                            onClick={() => {
-                              setShowCustomSummaryModal(false)
-                              setCustomSummaryTitle("")
-                              setCustomSummaryDescription("")
-                              setCustomSummaryKeywords("")
-                              setCustomSummaryFocusArea("")
-                            }}
-                            disabled={isCreatingCustomSummary}
-                          >
-                            Cancel
-                          </Button>
-                          <Button
-                            onClick={async () => {
-                              if (!customSummaryTitle.trim() || !customSummaryKeywords.trim()) {
-                                return
-                              }
-                              
-                              setIsCreatingCustomSummary(true)
-                              
-                              try {
-                                const keywords = customSummaryKeywords.split(',').map(k => k.trim()).filter(k => k.length > 0)
-                                
-                                const result = await aiSummaryService.createCustomSummary({
-                                  title: customSummaryTitle.trim(),
-                                  description: customSummaryDescription.trim(),
-                                  keywords: keywords,
-                                  focusArea: customSummaryFocusArea.trim(),
-                                  provider: selectedProvider,
-                                  model: selectedModel
-                                })
-                                
-                                if (result.success) {
-                                  // Close modal and reset form
+                            <DialogFooter>
+                              <Button
+                                variant="outline"
+                                onClick={() => {
                                   setShowCustomSummaryModal(false)
                                   setCustomSummaryTitle("")
                                   setCustomSummaryDescription("")
                                   setCustomSummaryKeywords("")
                                   setCustomSummaryFocusArea("")
-                                  
-                                  // Trigger a click on the new summary to display it
-                                  if (result.summary) {
-                                    setTimeout(() => {
-                                      handleSummaryClick(result.summary!.title)
-                                    }, 1000)
+                                }}
+                                disabled={isCreatingCustomSummary}
+                              >
+                                Cancel
+                              </Button>
+                              <Button
+                                onClick={async () => {
+                                  if (!customSummaryTitle.trim() || !customSummaryKeywords.trim()) {
+                                    return
                                   }
-                                } else {
-                                  console.error('Failed to create custom summary:', result.message)
-                                  // Could show a toast notification here
-                                }
-                              } catch (error) {
-                                console.error('Error creating custom summary:', error)
-                              } finally {
-                                setIsCreatingCustomSummary(false)
-                              }
-                            }}
-                            disabled={!customSummaryTitle.trim() || !customSummaryKeywords.trim() || isCreatingCustomSummary}
-                            className="bg-emerald-600 hover:bg-emerald-700"
-                          >
-                            {isCreatingCustomSummary ? (
-                              <>
-                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                                Creating...
-                              </>
-                            ) : (
-                              <>
-                                <Brain className="w-4 h-4 mr-2" />
-                                Create Summary
-                              </>
-                            )}
-                          </Button>
-                        </DialogFooter>
-                      </DialogContent>
-                    </Dialog>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="pt-0">
-                  <div className="grid grid-cols-1 gap-3">
-                    {dynamicSummaries.length === 0 ? (
-                      <div className="text-center py-8">
-                        <div className="w-12 h-12 bg-emerald-100 rounded-xl flex items-center justify-center mx-auto mb-4">
-                          <Brain className="w-6 h-6 text-emerald-400" />
-                        </div>
-                        <p className="text-sm text-slate-600 mb-2">No AI summaries available</p>
-                        <p className="text-xs text-slate-500">Upload documents to generate intelligent summaries</p>
-                      </div>
-                    ) : (
-                      dynamicSummaries.map((summary, index) => (
-                        <div
-                          key={index}
-                          onClick={() => handleSummaryClick(summary.name)}
-                          className={`group relative overflow-hidden rounded-xl border transition-all duration-300 cursor-pointer ${
-                            summary.active
-                              ? "bg-gradient-to-br from-emerald-50 via-teal-50 to-green-50 border-emerald-200 shadow-lg ring-2 ring-emerald-100"
-                              : !summary.name.trim() || documents.length === 0
-                              ? "bg-slate-50/80 border-slate-200 cursor-not-allowed opacity-60"
-                              : "bg-white/90 border-slate-200 hover:border-emerald-200 hover:shadow-md hover:bg-gradient-to-br hover:from-emerald-25 hover:to-teal-25"
-                          } ${isGeneratingSummary || !summary.name.trim() || documents.length === 0 ? "pointer-events-none" : ""}`}
-                        >
-                          {/* Subtle gradient overlay */}
-                          <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent pointer-events-none" />
-                          
-                          {/* Content */}
-                          <div className="relative p-4">
-                            <div className="flex items-start space-x-3">
-                              <div className={`p-3 rounded-xl transition-all duration-200 ${
-                                summary.active 
-                                  ? "bg-gradient-to-br from-emerald-100 to-teal-100 shadow-sm" 
-                                  : summary.name.trim()
-                                  ? "bg-gradient-to-br from-slate-100 to-slate-50 group-hover:from-emerald-50 group-hover:to-teal-50"
-                                  : "bg-slate-50"
-                              }`}>
-                                <FileText className={`w-5 h-5 transition-colors duration-200 ${
-                                  summary.active 
-                                    ? "text-emerald-600" 
-                                    : summary.name.trim()
-                                    ? "text-slate-600 group-hover:text-emerald-600"
-                                    : "text-slate-400"
-                                }`} />
+                                  
+                                  setIsCreatingCustomSummary(true)
+                                  
+                                  try {
+                                    const keywords = customSummaryKeywords.split(',').map(k => k.trim()).filter(k => k.length > 0)
+                                    
+                                    await createCustomSummary(
+                                      customSummaryTitle.trim(),
+                                      customSummaryDescription.trim(),
+                                      keywords
+                                    )
+                                    
+                                    // Close modal and reset form
+                                    setShowCustomSummaryModal(false)
+                                    setCustomSummaryTitle("")
+                                    setCustomSummaryDescription("")
+                                    setCustomSummaryKeywords("")
+                                    setCustomSummaryFocusArea("")
+                                    
+                                    // Auto-trigger content generation for the new summary
+                                    handleSummaryClick(customSummaryTitle.trim())
+                                  } catch (error) {
+                                    console.error('Error creating custom summary:', error)
+                                  } finally {
+                                    setIsCreatingCustomSummary(false)
+                                  }
+                                }}
+                                disabled={!customSummaryTitle.trim() || !customSummaryKeywords.trim() || isCreatingCustomSummary}
+                                className="bg-emerald-600 hover:bg-emerald-700"
+                              >
+                                {isCreatingCustomSummary ? (
+                                  <>
+                                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                    Creating...
+                                  </>
+                                ) : (
+                                  <>
+                                    <Brain className="w-4 h-4 mr-2" />
+                                    Create Summary
+                                  </>
+                                )}
+                              </Button>
+                            </DialogFooter>
+                          </DialogContent>
+                        </Dialog>
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="pt-0">
+                      {/* Scrollable container for AI Summary cards */}
+                      <div className="max-h-96 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-300 scrollbar-track-slate-100 hover:scrollbar-thumb-slate-400 pr-2">
+                        <div className="grid grid-cols-1 gap-3">
+                          {dynamicSummaries.length === 0 ? (
+                            <div className="text-center py-8">
+                              <div className="w-12 h-12 bg-emerald-100 rounded-xl flex items-center justify-center mx-auto mb-4">
+                                <Brain className="w-6 h-6 text-emerald-400" />
                               </div>
-                              <div className="flex-1 min-w-0">
-                                <h4 className={`text-sm font-semibold leading-tight mb-1 transition-colors duration-200 ${
-                                  summary.active 
-                                    ? "text-emerald-800" 
-                                    : summary.name.trim()
-                                    ? "text-slate-800 group-hover:text-emerald-700"
-                                    : "text-slate-400"
-                                }`} style={{ wordBreak: 'break-word', overflowWrap: 'break-word' }}>
-                                  {summary.name || "Empty Slot"}
-                                </h4>
-                                <p className={`text-xs transition-colors duration-200 ${
-                                  summary.active 
-                                    ? "text-emerald-600" 
-                                    : summary.name.trim()
-                                    ? "text-slate-500 group-hover:text-emerald-500"
-                                    : "text-slate-400"
-                                }`}>
-                                  {summary.name.trim() ? "Document summary" : "No document"}
-                                </p>
-                              </div>
+                              <p className="text-sm text-slate-600 mb-2">No AI summaries available</p>
+                              <p className="text-xs text-slate-500">Upload documents to generate intelligent summaries</p>
                             </div>
-                            
-                            {/* Active indicator */}
-                            {summary.active && (
-                              <div className="absolute top-2 right-2">
-                                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                          ) : (
+                            dynamicSummaries.map((summary, index) => (
+                              <div
+                                key={index}
+                                className={`group relative cursor-pointer border rounded-lg transition-all duration-200 py-2 px-3 transform hover:scale-[1.02] active:scale-[0.98] active:shadow-lg ${
+                                  summary.active
+                                    ? "border-green-200 bg-green-50 shadow-md"
+                                    : !summary.name.trim() || documents.length === 0
+                                    ? "border-gray-200 bg-gray-50 cursor-not-allowed opacity-60"
+                                    : "border-gray-200 bg-white hover:border-emerald-300 hover:shadow-md hover:bg-emerald-50/30"
+                                } ${isGeneratingSummary || !summary.name.trim() || documents.length === 0 ? "pointer-events-none" : ""}`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div 
+                                    className="flex items-center space-x-3 flex-1 min-w-0"
+                                    onClick={() => handleSummaryClick(summary.name)}
+                                  >
+                                    <FileText className={`w-4 h-4 flex-shrink-0 ${
+                                      summary.active 
+                                        ? "text-green-600" 
+                                        : summary.name.trim()
+                                        ? "text-gray-500"
+                                        : "text-gray-400"
+                                    }`} />
+                                    <span className={`text-sm truncate ${
+                                      summary.active 
+                                        ? "text-green-900 font-medium" 
+                                        : summary.name.trim()
+                                        ? "text-gray-700"
+                                        : "text-gray-400"
+                                    }`}>
+                                      {summary.name || "Empty Slot"}
+                                    </span>
+                                  </div>
+                                  
+                                  {summary.name.trim() && (
+                                    <Popover>
+                                      <PopoverTrigger asChild>
+                                        <Button
+                                          variant="ghost"
+                                          size="sm"
+                                          className="opacity-0 group-hover:opacity-100 h-6 w-6 p-0 text-gray-400 hover:text-gray-600"
+                                          onClick={(e) => e.stopPropagation()}
+                                        >
+                                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16">
+                                            <circle cx="2" cy="8" r="1.5"/>
+                                            <circle cx="8" cy="8" r="1.5"/>
+                                            <circle cx="14" cy="8" r="1.5"/>
+                                          </svg>
+                                        </Button>
+                                      </PopoverTrigger>
+                                      <PopoverContent className="w-40 p-1" align="end">
+                                        <div className="space-y-1">
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="w-full justify-start text-xs h-8"
+                                            onClick={() => {
+                                              navigator.clipboard.writeText(`AI Summary: ${summary.name}`)
+                                            }}
+                                          >
+                                            <Share2 className="w-3 h-3 mr-2" />
+                                            Share
+                                          </Button>
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="w-full justify-start text-xs h-8 text-red-600 hover:text-red-700 hover:bg-red-50"
+                                            onClick={() => {
+                                              // Use global state action to remove summary
+                                              console.log('✅ Summary removed from UI instantly:', summary.name)
+                                              // Note: For dynamic summaries, there's no backend deletion needed
+                                              // as they are generated on-the-fly based on documents
+                                            }}
+                                          >
+                                            <X className="w-3 h-3 mr-2" />
+                                            Delete
+                                          </Button>
+                                        </div>
+                                      </PopoverContent>
+                                    </Popover>
+                                  )}
+                                </div>
                               </div>
-                            )}
-                          </div>
+                            ))
+                          )}
                         </div>
-                      ))
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-
-
-              {/* Enhanced RAG Status */}
-              <Card className="mt-6 border-0 shadow-lg bg-gradient-to-br from-green-50 to-emerald-50">
-                <CardContent className="p-4">
-                  <div className="flex items-center space-x-3 mb-3">
-                    <div className="p-2 bg-green-100 rounded-lg">
-                      <Database className="w-4 h-4 text-green-600" />
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-sm font-semibold text-green-800">RAG System Active</span>
-                        <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
                       </div>
-                      <p className="text-xs text-green-600 mt-1">
-                        {documents.length} documents • {availableTags.length} AI tags
-                      </p>
-                    </div>
+                    </CardContent>
+                  </Card>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="bg-white/60 rounded-lg p-2 text-center">
-                      <div className="font-semibold text-green-800">{selectedProvider.toUpperCase()}</div>
-                      <div className="text-green-600">AI Provider</div>
-                    </div>
-                    <div className="bg-white/60 rounded-lg p-2 text-center">
-                      <div className="font-semibold text-green-800">{keepContext === "YES" ? "PURE" : "HYBRID"}</div>
-                      <div className="text-green-600">Mode</div>
-                    </div>
+                )}
+
+                {/* History Tab */}
+                {activeTab === "history" && (
+                  <div className="flex-1 overflow-hidden">
+                    <HistorySection 
+                      onConversationSelect={handleConversationSelect}
+                      selectedConversationId={selectedConversationId}
+                      onHistoryCardClick={handleHistoryCardClick}
+                      onNewConversation={handleNewConversation}
+                    />
                   </div>
-                </CardContent>
-              </Card>
+                )}
+              </div>
             </div>
           )}
 
@@ -1560,7 +1417,7 @@ function VaultPageContent() {
                 variant="ghost"
                 size="sm"
                 className="w-12 h-12 p-0 text-slate-600 hover:bg-slate-100"
-                onClick={() => setSidebarExpanded(true)}
+                onClick={toggleSidebarExpansion}
               >
                 <Sparkles className="w-5 h-5" />
               </Button>
@@ -1568,7 +1425,7 @@ function VaultPageContent() {
                 variant="ghost"
                 size="sm"
                 className="w-12 h-12 p-0 text-slate-600 hover:bg-slate-100"
-                onClick={() => setSidebarExpanded(true)}
+                onClick={toggleSidebarExpansion}
               >
                 <Brain className="w-5 h-5" />
               </Button>
@@ -1576,9 +1433,9 @@ function VaultPageContent() {
                 variant="ghost"
                 size="sm"
                 className="w-12 h-12 p-0 text-slate-600 hover:bg-slate-100"
-                onClick={() => setSidebarExpanded(true)}
+                onClick={toggleSidebarExpansion}
               >
-                <FileText className="w-5 h-5" />
+                <History className="w-5 h-5" />
               </Button>
             </div>
           )}
@@ -1586,98 +1443,76 @@ function VaultPageContent() {
 
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col h-full">
-          {/* Enhanced Header with Integrated Navigation */}
-          <div className="p-4 border-b border-slate-200/60 bg-white/95 backdrop-blur-xl flex-shrink-0 shadow-sm">
+          {/* Ultra-Compact Mobile Header */}
+          <div className="mobile-header lg:p-4 border-b border-slate-200/60 bg-white/95 backdrop-blur-xl flex-shrink-0 shadow-sm">
             <div className="flex justify-between items-center w-full">
-              {/* Left Section - Logo and Title */}
-              <div className="flex items-center">
-                <Button variant="ghost" size="sm" onClick={toggleSidebar} className="mr-3 md:hidden">
-                  <Menu className="h-5 w-5" />
+              {/* Mobile: Minimal Header */}
+              <div className="md:hidden flex items-center justify-between w-full">
+                <Button variant="ghost" size="sm" onClick={toggleSidebar} className="mobile-menu-button mr-2">
+                  <Menu className="h-4 w-4" />
                 </Button>
-                <div className="flex items-center space-x-3">
-                  <div className="p-2 bg-gradient-to-r from-slate-100 to-gray-200 rounded-lg shadow-md border border-slate-300">
-                    <Brain className="w-5 h-5 text-slate-700" />
-                  </div>
-                  <div>
-                    <h1 className="text-lg font-bold bg-gradient-to-r from-indigo-700 via-blue-800 to-slate-800 bg-clip-text text-transparent">SIXTHVAULT</h1>
-                    <p className="text-xs text-slate-600 font-medium">Intelligent Document Analysis & RAG System</p>
-                  </div>
-                </div>
+                <Button 
+                  onClick={logout}
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2 text-xs"
+                >
+                  <LogOut className="w-3 h-3" />
+                </Button>
               </div>
 
-              {/* Center Section - Navigation Buttons */}
-              <div className="hidden lg:flex items-center space-x-3">
-                <Link href="/documents">
-                  <Button 
-                    size="default"
-                    className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold px-4 py-2 rounded-lg shadow-md hover:shadow-lg transform hover:scale-105 transition-all duration-200 border-0"
-                  >
-                    <FileText className="w-4 h-4 mr-2" />
-                    DOCUMENT MANAGEMENT
-                  </Button>
-                </Link>
-
-                {user?.is_admin && (
-                  <Link href="/admin">
+              {/* Desktop: Full Header */}
+              <div className="hidden md:flex justify-between items-center w-full">
+                {/* Center Section - Navigation Buttons */}
+                <div className="flex items-center space-x-3">
+                  <Link href="/documents">
                     <Button 
-                      size="default"
-                      className="bg-gradient-to-r from-slate-600 to-gray-700 hover:from-slate-700 hover:to-gray-800 text-white font-semibold px-4 py-2 rounded-lg shadow-md hover:shadow-lg transform hover:scale-105 transition-all duration-200 border-0 relative overflow-hidden group"
+                      variant="outline"
+                      className="bg-slate-50 hover:bg-slate-100 text-slate-700 hover:text-slate-800 border-slate-200 hover:border-slate-300 font-medium px-2 py-1 h-6 text-xs rounded-md transition-all duration-200"
                     >
-                      {/* Shimmer effect on hover */}
-                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-700"></div>
-                      <Settings className="w-4 h-4 mr-2 relative z-10" />
-                      <span className="relative z-10">ADMIN PANEL</span>
+                      <FileText className="w-3 h-3 mr-1" />
+                      DOCUMENT MANAGEMENT
                     </Button>
                   </Link>
-                )}
-              </div>
 
-              {/* Right Section - Status and Logout */}
-              <div className="flex items-center space-x-3">
-                <Badge variant="outline" className="hidden md:flex bg-green-50 text-green-700 border-green-200">
-                  <Activity className="w-3 h-3 mr-1" />
-                  System Active
-                </Badge>
-              <Button 
-                onClick={logout}
-                className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-medium transition-colors duration-200"
-              >
-                <LogOut className="w-4 h-4 mr-2" />
-                Logout
-              </Button>
-              </div>
-            </div>
+                  {user?.is_admin && (
+                    <Button 
+                      variant="outline"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        // Admin panel temporarily disabled
+                      }}
+                      className="bg-slate-50 hover:bg-slate-100 text-slate-700 hover:text-slate-800 border-slate-200 hover:border-slate-300 font-medium px-2 py-1 h-6 text-xs rounded-md transition-all duration-200 cursor-not-allowed"
+                    >
+                      <Settings className="w-3 h-3 mr-1" />
+                      ADMIN PANEL
+                    </Button>
+                  )}
+                </div>
 
-            {/* Mobile Navigation - Shown below header on smaller screens */}
-            <div className="lg:hidden mt-4 pt-4 border-t border-slate-200/60">
-              <div className="flex flex-col sm:flex-row gap-3 justify-center">
-                <Link href="/documents" className="flex-1 sm:flex-none">
+                {/* Right Section - Logout and Status */}
+                <div className="flex items-center space-x-3">
                   <Button 
-                    size="default"
-                    className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold px-4 py-2 rounded-lg shadow-md hover:shadow-lg transition-all duration-200 border-0"
+                    onClick={logout}
+                    variant="outline"
+                    className="bg-slate-50 hover:bg-slate-100 text-slate-700 hover:text-slate-800 border-slate-200 hover:border-slate-300 font-medium px-2 py-1 h-6 text-xs rounded-md transition-all duration-200"
                   >
-                    <FileText className="w-4 h-4 mr-2" />
-                    DOCUMENT MANAGEMENT
+                    <LogOut className="w-3 h-3 mr-1" />
+                    LOGOUT
                   </Button>
-                </Link>
-
-                <Link href="/admin" className="flex-1 sm:flex-none">
-                  <Button 
-                    size="default"
-                    className="w-full bg-gradient-to-r from-slate-600 to-gray-700 hover:from-slate-700 hover:to-gray-800 text-white font-semibold px-4 py-2 rounded-lg shadow-md hover:shadow-lg transition-all duration-200 border-0"
-                  >
-                    <Settings className="w-4 h-4 mr-2" />
-                    ADMIN PANEL
-                  </Button>
-                </Link>
+                  <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">
+                    <Activity className="w-3 h-3 mr-1" />
+                    System Active
+                  </Badge>
+                </div>
               </div>
             </div>
           </div>
 
-          {/* Enhanced Controls - Keep at Top */}
-          <div className="p-4 bg-white/95 backdrop-blur-xl border-b border-slate-200/60 flex-shrink-0 shadow-sm">
-            {/* Enhanced Controls */}
-            <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+          {/* Compact Controls */}
+          <div className="p-2 bg-white/95 backdrop-blur-xl border-b border-slate-200/60 flex-shrink-0 shadow-sm">
+            {/* Compact Controls */}
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
               <div>
                 <label className="text-xs font-medium text-slate-600 mb-1 block">Documents</label>
                 <Popover open={documentSelectorOpen} onOpenChange={setDocumentSelectorOpen}>
@@ -1686,7 +1521,7 @@ function VaultPageContent() {
                       variant="outline"
                       role="combobox"
                       aria-expanded={documentSelectorOpen}
-                      className="w-full justify-between bg-white border-slate-200 rounded-lg h-10 text-sm hover:border-slate-300 transition-colors"
+                      className="w-full justify-between bg-white border-slate-200 rounded-lg h-8 text-xs hover:border-slate-300 transition-colors"
                     >
                       <div className="flex items-center space-x-2 flex-1 min-w-0">
                         <FileText className="w-4 h-4 text-slate-500 flex-shrink-0" />
@@ -1769,9 +1604,9 @@ function VaultPageContent() {
                                     key={doc.id}
                                     onSelect={() => {
                                       if (isSelected) {
-                                        setSelectedFiles(prev => prev.filter(id => id !== doc.id))
+                                        setSelectedFiles(selectedFiles.filter((id: string) => id !== doc.id))
                                       } else {
-                                        setSelectedFiles(prev => [...prev, doc.id])
+                                        setSelectedFiles([...selectedFiles, doc.id])
                                       }
                                     }}
                                     className="flex items-center space-x-2 cursor-pointer"
@@ -1833,14 +1668,14 @@ function VaultPageContent() {
                   value={searchTag}
                   onChange={(e) => setSearchTag(e.target.value)}
                   placeholder="Filter by tags..."
-                  className="bg-white border-slate-200 rounded-lg h-10 text-sm hover:border-slate-300 transition-colors"
+                  className="bg-white border-slate-200 rounded-lg h-8 text-xs hover:border-slate-300 transition-colors"
                 />
               </div>
 
               <div>
                 <label className="text-xs font-medium text-slate-600 mb-1 block">Mode</label>
-                <Select value={keepContext} onValueChange={setKeepContext}>
-                  <SelectTrigger className="bg-white border-slate-200 rounded-lg h-10 text-sm hover:border-slate-300 transition-colors">
+                <Select value={keepContext} onValueChange={(value) => updateContextSettings(value, maxContext)}>
+                  <SelectTrigger className="bg-white border-slate-200 rounded-lg h-8 text-xs hover:border-slate-300 transition-colors">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1852,8 +1687,8 @@ function VaultPageContent() {
 
               <div>
                 <label className="text-xs font-medium text-slate-600 mb-1 block">Context</label>
-                <Select value={maxContext} onValueChange={setMaxContext}>
-                  <SelectTrigger className="bg-white border-slate-200 rounded-lg h-10 text-sm hover:border-slate-300 transition-colors">
+                <Select value={maxContext} onValueChange={(value) => updateContextSettings(keepContext, value)}>
+                  <SelectTrigger className="bg-white border-slate-200 rounded-lg h-8 text-xs hover:border-slate-300 transition-colors">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1865,8 +1700,8 @@ function VaultPageContent() {
 
               <div>
                 <label className="text-xs font-medium text-slate-600 mb-1 block">AI Provider</label>
-                <Select value={selectedProvider} onValueChange={setSelectedProvider}>
-                  <SelectTrigger className="bg-white border-slate-200 rounded-lg h-10 text-sm hover:border-slate-300 transition-colors">
+                <Select value={selectedProvider} onValueChange={(value) => updateProviderSettings(value, selectedModel)}>
+                  <SelectTrigger className="bg-white border-slate-200 rounded-lg h-8 text-xs hover:border-slate-300 transition-colors">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1882,13 +1717,13 @@ function VaultPageContent() {
 
               <div>
                 <label className="text-xs font-medium text-slate-600 mb-1 block">Model</label>
-                <Select value={selectedModel} onValueChange={setSelectedModel}>
-                  <SelectTrigger className="bg-white border-slate-200 rounded-lg h-10 text-sm hover:border-slate-300 transition-colors">
+                <Select value={selectedModel} onValueChange={(value) => updateProviderSettings(selectedProvider, value)}>
+                  <SelectTrigger className="bg-white border-slate-200 rounded-lg h-8 text-xs hover:border-slate-300 transition-colors">
                     <SelectValue placeholder="Select model..." />
                   </SelectTrigger>
                   <SelectContent>
-                    {availableModels.map((model) => (
-                      <SelectItem key={model.name} value={model.name}>
+                    {availableModels.map((model, index) => (
+                      <SelectItem key={`${model.name}-${index}`} value={model.name}>
                         <div className="flex items-center space-x-2">
                           <span>{model.displayName}</span>
                           {model.isLocal && (
@@ -1905,10 +1740,10 @@ function VaultPageContent() {
             </div>
           </div>
 
-          {/* Enhanced Chat Area */}
-          <div className="flex-1 bg-gradient-to-br from-slate-50/50 via-blue-50/20 to-indigo-50/10 overflow-auto">
+          {/* Enhanced Chat Area with Mobile Responsive Design */}
+          <div className="flex-1 bg-gradient-to-br from-slate-50/50 via-blue-50/20 to-indigo-50/10 overflow-auto mobile-chat-container mobile-smooth-scroll pb-32 md:pb-6">
             <div className="p-6 min-h-full">
-              {chatMessages.length === 0 && !isLoading && (
+              {chatMessages.length === 0 && !isGeneratingCuration && !isGeneratingSummary && (
                 <div className="flex items-center justify-center min-h-[calc(100vh-300px)]">
                   <div className="text-center max-w-2xl px-6">
                     <div className="mx-auto w-16 h-16 bg-gradient-to-br from-slate-100 to-slate-200 rounded-xl flex items-center justify-center mb-6">
@@ -2050,7 +1885,7 @@ function VaultPageContent() {
                                   <Button
                                     variant="outline"
                                     size="sm"
-                                    onClick={() => toggleSources(message.id)}
+                                    onClick={() => toggleExpandedSources(message.id)}
                                     className="h-8 px-3 text-sm bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100 hover:border-blue-300"
                                   >
                                     <Eye className="w-4 h-4 mr-2" />
@@ -2062,16 +1897,16 @@ function VaultPageContent() {
                                     )}
                                   </Button>
                                 )}
-                                
+
                                 {message.relevanceScores && message.relevanceScores.length > 0 && (
                                   <Button
                                     variant="outline"
                                     size="sm"
-                                    onClick={() => toggleRelevance(message.id)}
+                                    onClick={() => toggleExpandedRelevance(message.id)}
                                     className="h-8 px-3 text-sm bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100 hover:border-emerald-300"
                                   >
                                     <BarChart className="w-4 h-4 mr-2" />
-                                    Relevance ({message.relevanceScores.length})
+                                    Relevance
                                     {expandedRelevance.has(message.id) ? (
                                       <ChevronUp className="w-4 h-4 ml-2" />
                                     ) : (
@@ -2080,126 +1915,56 @@ function VaultPageContent() {
                                   </Button>
                                 )}
                               </div>
-
-                              <div className="flex space-x-2 mt-4 md:mt-0">
-                                <Button variant="outline" size="sm" className="h-8 text-sm bg-white hover:bg-slate-50">
-                                  <Share2 className="w-4 h-4 mr-2" /> Share
-                                </Button>
-                                <Button variant="outline" size="sm" className="h-8 text-sm bg-white hover:bg-slate-50">
-                                  <Download className="w-4 h-4 mr-2" /> Export
-                                </Button>
-                              </div>
                             </div>
 
-                            {/* Enhanced Expandable Sources Section */}
+                            {/* Enhanced expandable sources */}
                             {message.documentNames && message.documentNames.length > 0 && expandedSources.has(message.id) && (
-                              <div className="mt-6 pt-6 border-t border-slate-200 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl p-6 transition-all duration-300">
-                                <div className="flex items-center mb-4">
-                                  <div className="p-2 bg-blue-100 rounded-lg mr-3">
-                                    <Eye className="w-5 h-5 text-blue-600" />
-                                  </div>
-                                  <div>
-                                    <span className="text-lg font-semibold text-blue-800">Document Sources</span>
-                                    <Badge variant="secondary" className="ml-3 bg-blue-100 text-blue-700">
-                                      {message.documentNames.length} documents
-                                    </Badge>
-                                  </div>
-                                </div>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div className="mt-6 pt-4 border-t border-slate-200">
+                                <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center">
+                                  <FileText className="w-4 h-4 mr-2 text-blue-600" />
+                                  Source Documents ({message.documentNames.length})
+                                </h4>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                   {message.documentNames.map((name, index) => (
-                                    <Card
-                                      key={index}
-                                      className="border-0 bg-white/80 hover:bg-white hover:shadow-md transition-all duration-200"
-                                    >
-                                      <CardContent className="p-4">
-                                        <div className="flex items-center justify-between">
-                                          <div className="flex items-center flex-1 min-w-0">
-                                            <div className="p-2 bg-blue-50 rounded-lg mr-3">
-                                              <FileText className="w-4 h-4 text-blue-600" />
-                                            </div>
-                                            <div className="flex-1 min-w-0">
-                                              <p className="text-sm font-medium text-slate-800 truncate" title={name}>
-                                                {name}
-                                              </p>
-                                              <p className="text-xs text-slate-500">Source document</p>
-                                            </div>
-                                          </div>
-                                          <Button
-                                            variant="ghost"
-                                            size="sm"
-                                            className="h-6 w-6 p-0 ml-2 text-slate-400 hover:text-blue-600"
-                                          >
-                                            <ExternalLink className="w-3 h-3" />
-                                          </Button>
-                                        </div>
-                                      </CardContent>
-                                    </Card>
+                                    <div key={index} className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                                      <div className="flex items-center space-x-2">
+                                        <FileText className="w-4 h-4 text-slate-500 flex-shrink-0" />
+                                        <span className="text-sm font-medium text-slate-700 truncate" title={name}>
+                                          {name}
+                                        </span>
+                                      </div>
+                                    </div>
                                   ))}
                                 </div>
                               </div>
                             )}
 
-                            {/* Enhanced Expandable Document Relevance Section */}
+                            {/* Enhanced expandable relevance scores */}
                             {message.relevanceScores && message.relevanceScores.length > 0 && expandedRelevance.has(message.id) && (
-                              <div className="mt-6 pt-6 border-t border-slate-200 bg-gradient-to-r from-emerald-50 to-teal-50 rounded-xl p-6 transition-all duration-300">
-                                <div className="flex items-center mb-4">
-                                  <div className="p-2 bg-emerald-100 rounded-lg mr-3">
-                                    <BarChart className="w-5 h-5 text-emerald-600" />
-                                  </div>
-                                  <div>
-                                    <span className="text-lg font-semibold text-emerald-800">Document Relevance Scores</span>
-                                    <Badge variant="secondary" className="ml-3 bg-emerald-100 text-emerald-700">
-                                      {message.relevanceScores.length} scores
-                                    </Badge>
-                                  </div>
-                                </div>
+                              <div className="mt-6 pt-4 border-t border-slate-200">
+                                <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center">
+                                  <BarChart className="w-4 h-4 mr-2 text-emerald-600" />
+                                  Document Relevance Scores
+                                </h4>
                                 <div className="space-y-3">
-                                  {message.relevanceScores
-                                    .sort((a, b) => b.score - a.score) // Sort by relevance score descending
-                                    .map((item, index) => (
-                                      <Card
-                                        key={index}
-                                        className="border-0 bg-white/80 hover:bg-white hover:shadow-md transition-all duration-200"
-                                      >
-                                        <CardContent className="p-4">
-                                          <div className="flex items-center justify-between mb-3">
-                                            <div className="flex items-center flex-1 min-w-0">
-                                              <div className="p-2 bg-emerald-50 rounded-lg mr-3">
-                                                <FileText className="w-4 h-4 text-emerald-600" />
-                                              </div>
-                                              <div className="flex-1 min-w-0">
-                                                <p className="text-sm font-medium text-slate-800 truncate" title={item.name}>
-                                                  {item.name}
-                                                </p>
-                                                <p className="text-xs text-slate-500">Relevance analysis</p>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-center ml-3">
-                                              <div className="bg-emerald-100 rounded-full px-3 py-1">
-                                                <span className="text-sm font-bold text-emerald-800">
-                                                  {typeof item.score === 'number' ? item.score.toFixed(3) : item.score}
-                                                </span>
-                                              </div>
-                                            </div>
-                                          </div>
-                                          {/* Enhanced Visual relevance bar */}
-                                          <div className="relative">
-                                            <div className="w-full bg-slate-200 rounded-full h-2">
-                                              <div
-                                                className="bg-gradient-to-r from-emerald-500 to-teal-500 h-2 rounded-full transition-all duration-500 ease-out"
-                                                style={{
-                                                  width: `${Math.min(100, (typeof item.score === 'number' ? item.score : parseFloat(item.score) || 0) * 100)}%`
-                                                }}
-                                              ></div>
-                                            </div>
-                                            <div className="flex justify-between text-xs text-slate-500 mt-1">
-                                              <span>Low</span>
-                                              <span>High</span>
-                                            </div>
-                                          </div>
-                                        </CardContent>
-                                      </Card>
-                                    ))}
+                                  {message.relevanceScores.map((item, index) => (
+                                    <div key={index} className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                                      <div className="flex items-center justify-between mb-2">
+                                        <span className="text-sm font-medium text-slate-700 truncate" title={item.name}>
+                                          {item.name}
+                                        </span>
+                                        <Badge variant="outline" className="text-xs bg-emerald-50 text-emerald-700 border-emerald-200">
+                                          {(item.score * 100).toFixed(1)}%
+                                        </Badge>
+                                      </div>
+                                      <div className="w-full bg-slate-200 rounded-full h-2">
+                                        <div
+                                          className="bg-gradient-to-r from-emerald-500 to-emerald-600 h-2 rounded-full transition-all duration-300"
+                                          style={{ width: `${item.score * 100}%` }}
+                                        ></div>
+                                      </div>
+                                    </div>
+                                  ))}
                                 </div>
                               </div>
                             )}
@@ -2209,59 +1974,35 @@ function VaultPageContent() {
                   </div>
                 ))}
 
-                {isLoading && (
-                  <div className="text-left">
-                    <div className="inline-block bg-white/95 backdrop-blur-xl border-2 border-slate-100 p-8 rounded-2xl shadow-xl">
-                      <div className="flex items-center space-x-4">
-                        <div className="relative">
-                          <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
-                          <div className="absolute inset-0 w-8 h-8 border-2 border-blue-200 rounded-full animate-pulse"></div>
-                        </div>
-                        <div>
-                          <span className="text-lg font-medium text-slate-700">
-                            {maxContext === "YES"
-                              ? "AI analyzing documents with maximum context for comprehensive insights..."
-                              : keepContext === "YES"
-                                ? "AI searching documents and generating precise response..."
-                                : "AI analyzing documents and generating enhanced hybrid response..."}
-                          </span>
-                          <p className="text-sm text-slate-500 mt-1">
-                            Using {selectedProvider.charAt(0).toUpperCase() + selectedProvider.slice(1)} AI • 
-                            {selectedFiles.length === 0 
-                              ? `${documents.length} documents available` 
-                              : `${selectedFiles.length} selected documents`}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
               </div>
             </div>
           </div>
 
-          {/* Enhanced Input Area - Only Input Field Moved to Bottom */}
-          <div className="p-4 bg-white/95 backdrop-blur-xl border-t border-slate-200/60 flex-shrink-0 shadow-sm">
-            <div className="relative">
-              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                <Search className="h-5 w-5 text-slate-400" />
+          {/* Enhanced Input Area */}
+          <div className="p-6 bg-white/95 backdrop-blur-xl border-t border-slate-200/60 flex-shrink-0 shadow-lg">
+            <div className="relative max-w-4xl mx-auto">
+              <div className="flex items-center space-x-4 bg-gradient-to-r from-slate-50 to-blue-50/30 rounded-2xl p-4 border-2 border-slate-200/60 shadow-lg">
+                <Input
+                  value={inputMessage}
+                  onChange={(e) => setInputMessage(e.target.value)}
+                  onKeyPress={(e) => e.key === "Enter" && !e.shiftKey && handleSendMessage()}
+                  placeholder="Ask questions about your documents or start a conversation..."
+                  className="flex-1 bg-white/80 border-slate-200 rounded-xl text-base placeholder:text-slate-500 focus:border-blue-300 focus:ring-2 focus:ring-blue-200 transition-all duration-200"
+                  disabled={isGeneratingCuration || isGeneratingSummary}
+                />
+                <Button
+                  size="lg"
+                  onClick={handleSendMessage}
+                  disabled={isGeneratingCuration || isGeneratingSummary || !inputMessage.trim()}
+                  className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-6 py-3 rounded-xl shadow-lg transition-all duration-200 flex-shrink-0"
+                >
+                  {(isGeneratingCuration || isGeneratingSummary) ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <Send className="w-5 h-5" />
+                  )}
+                </Button>
               </div>
-              <Input
-                value={inputMessage}
-                onChange={(e) => setInputMessage(e.target.value)}
-                onKeyPress={(e) => e.key === "Enter" && handleSendMessage()}
-                placeholder="Ask AI about your documents, market trends, or business insights..."
-                className="w-full h-14 pl-12 pr-16 text-base bg-gradient-to-r from-slate-50 to-blue-50/30 border-2 border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 placeholder:text-slate-400"
-                disabled={isLoading}
-              />
-              <Button
-                size="sm"
-                onClick={handleSendMessage}
-                disabled={isLoading || !inputMessage.trim()}
-                className="absolute right-2 top-1/2 transform -translate-y-1/2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 h-10 w-10 p-0 rounded-xl transition-all duration-200 hover:scale-105 shadow-lg"
-              >
-                {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
-              </Button>
             </div>
           </div>
         </div>

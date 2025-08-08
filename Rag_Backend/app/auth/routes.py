@@ -8,7 +8,8 @@ from app.config import settings
 from app.database import User, TempUser
 from app.auth.models import (
     UserCreate, UserLogin, UserResponse, Token,
-    ForgotPasswordRequest, ResetPasswordRequest, ValidateResetTokenRequest
+    ForgotPasswordRequest, ResetPasswordRequest, ValidateResetTokenRequest,
+    VerifyResetCodeRequest
 )
 from app.auth.jwt_handler import verify_password, get_password_hash, create_access_token
 from app.deps import get_current_user
@@ -167,6 +168,15 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
     device_info = f"{request.headers.get('user-agent', 'Unknown')} - {request.client.host}"
     await TokenService.store_token(db, str(user.id), access_token, device_info)
     
+    # 🚀 PRE-CACHE ALL VAULT DATA DURING LOGIN FOR INSTANT ACCESS
+    print(f"🚀 LOGIN: Starting comprehensive data pre-caching for user {user.id} for instant vault access")
+    try:
+        await pre_cache_vault_data_for_user(str(user.id), db)
+        print(f"✅ LOGIN: Successfully pre-cached all vault data for user {user.id}")
+    except Exception as e:
+        print(f"⚠️ LOGIN: Pre-caching failed for user {user.id}: {e}")
+        # Don't fail login if pre-caching fails, just log the error
+    
     # Prepare user response
     user_response = UserResponse(
         id=user.id,
@@ -191,19 +201,50 @@ class VerificationRequest(BaseModel):
     verification_code: str
 
 @router.post("/verify")
-async def verify_email(request: VerificationRequest, db: Session = Depends(get_session)):
+async def verify_email(request: Request, db: Session = Depends(get_session)):
     """Verify user email with verification code"""
-    email = request.email.lower().strip()
-    
-    # Sanitize and validate input verification code
-    input_code = request.verification_code.strip().upper() if request.verification_code else ""
+    try:
+        # Parse JSON body from request
+        body = await request.json()
+        print(f"Verification request received: {body}")
+        
+        # Extract email and verification code from request
+        email = body.get("email", "").lower().strip()
+        # Support both camelCase (frontend) and snake_case (backend) formats
+        verification_code = body.get("verificationCode", body.get("verification_code", "")).strip()
+        
+        print(f"Extracted - Email: {email}, Code: {verification_code}")
+        
+        # Validate input
+        if not email:
+            print(f"Verification failed - No email provided")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email is required"
+            )
+        
+        if not verification_code:
+            print(f"Verification failed - No verification code provided")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verification code is required"
+            )
+        
+        # Sanitize and validate input verification code
+        input_code = verification_code.upper()
+    except Exception as e:
+        print(f"Verification failed - Request parsing error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid request format"
+        )
     
     # Remove any non-alphanumeric characters (spaces, dashes, etc.)
     input_code = ''.join(c for c in input_code if c.isalnum())
     
     # Validate code format
     if not input_code or len(input_code) != 6:
-        print(f"Verification failed - Invalid code format. Input: '{request.verification_code}', Sanitized: '{input_code}', Length: {len(input_code)}")
+        print(f"Verification failed - Invalid code format. Input: '{verification_code}', Sanitized: '{input_code}', Length: {len(input_code)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Verification code must be exactly 6 characters (letters and numbers only)"
@@ -234,7 +275,7 @@ async def verify_email(request: VerificationRequest, db: Session = Depends(get_s
     
     # Debug logging (remove in production)
     print(f"Verification attempt for email: {email}")
-    print(f"Original input: '{request.verification_code}'")
+    print(f"Original input: '{verification_code}'")
     print(f"Sanitized input: '{input_code}'")
     print(f"Stored code: '{stored_code}'")
     print(f"Codes match: {stored_code == input_code}")
@@ -306,9 +347,25 @@ async def verify_email(request: VerificationRequest, db: Session = Depends(get_s
         )
 
 @router.post("/resend-verification", response_model=dict)
-async def resend_verification(email: str, db: Session = Depends(get_session)):
+async def resend_verification(request: Request, db: Session = Depends(get_session)):
     """Resend verification code"""
-    email = email.lower()
+    try:
+        # Parse JSON body from request
+        body = await request.json()
+        email = body.get("email", "").lower().strip()
+        
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email is required"
+            )
+    except Exception as e:
+        print(f"Resend verification failed - Request parsing error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid request format"
+        )
+    
     temp_user = db.exec(select(TempUser).where(TempUser.email == email)).first()
     
     if not temp_user:
@@ -398,15 +455,32 @@ async def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(
             detail="Internal server error"
         )
 
-class VerifyResetCodeRequest(BaseModel):
-    email: str
-    verification_code: str
-
 @router.post("/verify-reset-code")
-async def verify_reset_code(request: VerifyResetCodeRequest, db: Session = Depends(get_session)):
+async def verify_reset_code(request: Request, db: Session = Depends(get_session)):
     """Verify password reset code and return reset token"""
     try:
-        email = request.email.lower()
+        # Parse JSON body manually to debug the issue
+        body = await request.json()
+        print(f"Raw request body: {body}")
+        
+        # Extract fields manually - support both camelCase and snake_case
+        email = body.get("email", "").lower().strip()
+        verification_code = body.get("verificationCode", body.get("verification_code", "")).strip()
+        
+        print(f"Password reset verification request received: email={email}, verification_code={verification_code}")
+        
+        # Validate required fields
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email is required"
+            )
+        
+        if not verification_code:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verification code is required"
+            )
         
         # Find user by email
         user = db.exec(select(User).where(User.email == email)).first()
@@ -437,14 +511,14 @@ async def verify_reset_code(request: VerifyResetCodeRequest, db: Session = Depen
             )
         
         # Sanitize and validate input verification code
-        input_code = request.verification_code.strip().upper() if request.verification_code else ""
+        input_code = verification_code.strip().upper() if verification_code else ""
         
         # Remove any non-alphanumeric characters
         input_code = ''.join(c for c in input_code if c.isalnum())
         
         # Validate code format
         if not input_code or len(input_code) != 6:
-            print(f"Password reset verification failed - Invalid code format. Input: '{request.verification_code}', Sanitized: '{input_code}'")
+            print(f"Password reset verification failed - Invalid code format. Input: '{verification_code}', Sanitized: '{input_code}'")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Verification code must be exactly 6 characters (letters and numbers only)"
@@ -455,7 +529,7 @@ async def verify_reset_code(request: VerifyResetCodeRequest, db: Session = Depen
         
         # Debug logging
         print(f"Password reset verification attempt for email: {email}")
-        print(f"Original input: '{request.verification_code}'")
+        print(f"Original input: '{verification_code}'")
         print(f"Sanitized input: '{input_code}'")
         print(f"Stored code: '{stored_code}'")
         print(f"Codes match: {stored_code == input_code}")
@@ -474,6 +548,9 @@ async def verify_reset_code(request: VerifyResetCodeRequest, db: Session = Depen
         reset_token = secrets.token_urlsafe(32)
         reset_expires = datetime.utcnow() + timedelta(minutes=15)  # 15 minutes for password reset
         
+        print(f"Generated reset token: {reset_token}")
+        print(f"Reset token expires at: {reset_expires}")
+        
         # Update user with new reset token
         user.reset_token = reset_token
         user.reset_token_expires_at = reset_expires
@@ -482,10 +559,14 @@ async def verify_reset_code(request: VerifyResetCodeRequest, db: Session = Depen
         db.add(user)
         db.commit()
         
-        return {
+        response_data = {
             "message": "Verification code verified successfully",
-            "reset_token": reset_token
+            "reset_token": reset_token,
+            "resetToken": reset_token  # Add camelCase version for frontend compatibility
         }
+        
+        print(f"Returning response: {response_data}")
+        return response_data
         
     except HTTPException:
         raise
@@ -497,11 +578,26 @@ async def verify_reset_code(request: VerifyResetCodeRequest, db: Session = Depen
         )
 
 @router.post("/validate-reset-token")
-async def validate_reset_token(request: ValidateResetTokenRequest, db: Session = Depends(get_session)):
+async def validate_reset_token(request: Request, db: Session = Depends(get_session)):
     """Validate password reset token"""
     try:
+        # Parse JSON body manually to debug the issue
+        body = await request.json()
+        print(f"Validate reset token request body: {body}")
+        
+        # Extract token from request
+        token = body.get("token", "").strip()
+        
+        print(f"Validate reset token request received: token={token}")
+        
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Token is required"
+            )
+        
         # Find user by reset token
-        user = db.exec(select(User).where(User.reset_token == request.token)).first()
+        user = db.exec(select(User).where(User.reset_token == token)).first()
         
         if not user:
             raise HTTPException(
@@ -696,3 +792,255 @@ async def send_password_change_notification(email: str, first_name: str):
     print(f"Changed on: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
     print("If you didn't make this change, contact support immediately.")
     print("=== END PASSWORD CHANGE NOTIFICATION ===")
+
+async def pre_cache_vault_data_for_user(user_id: str, db: Session):
+    """
+    Pre-cache all vault data during login for instant access when user reaches vault page.
+    This eliminates the 40+ second loading delay by doing all the heavy lifting during login.
+    """
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    
+    print(f"🚀 PRE-CACHE: Starting comprehensive vault data pre-caching for user {user_id}")
+    start_time = datetime.utcnow()
+    
+    try:
+        # Import required services and clients
+        from app.routes.documents import get_user_documents
+        from app.routes.curations import get_user_curations
+        from app.routes.conversations import get_conversations
+        from app.routes.summaries import get_summary_status
+        from app.routes.providers import get_provider_models
+        
+        # Create a thread pool for parallel execution
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            # Submit all data loading tasks in parallel
+            print(f"📊 PRE-CACHE: Loading documents for user {user_id}")
+            documents_future = executor.submit(get_documents_for_user, user_id, db)
+            
+            print(f"🎯 PRE-CACHE: Loading curations for user {user_id}")
+            curations_future = executor.submit(get_curations_for_user, user_id, db)
+            
+            print(f"💬 PRE-CACHE: Loading conversations for user {user_id}")
+            conversations_future = executor.submit(get_conversations_for_user, user_id, db)
+            
+            print(f"📝 PRE-CACHE: Loading summaries status for user {user_id}")
+            summaries_future = executor.submit(get_summaries_status_for_user, user_id, db)
+            
+            print(f"🤖 PRE-CACHE: Loading AI providers and models")
+            providers_future = executor.submit(get_provider_models_for_user, user_id, db)
+            
+            # Wait for all tasks to complete
+            documents = documents_future.result()
+            curations = curations_future.result()
+            conversations = conversations_future.result()
+            summaries = summaries_future.result()
+            providers = providers_future.result()
+            
+            print(f"✅ PRE-CACHE: Successfully loaded all data:")
+            print(f"   - Documents: {len(documents) if documents else 0}")
+            print(f"   - Curations: {len(curations) if curations else 0}")
+            print(f"   - Conversations: {len(conversations) if conversations else 0}")
+            print(f"   - Summaries: {len(summaries) if summaries else 0}")
+            print(f"   - AI Providers: {len(providers) if providers else 0}")
+            
+            # Pre-cache conversation content for instant history access
+            if conversations and len(conversations) > 0:
+                print(f"🔄 PRE-CACHE: Pre-loading conversation content for instant access")
+                await pre_cache_conversation_content(conversations[:10], user_id, db)  # Cache top 10 conversations
+            
+            # Pre-cache curation content for instant access
+            if curations and len(curations) > 0:
+                print(f"🔄 PRE-CACHE: Pre-loading curation content for instant access")
+                await pre_cache_curation_content(curations[:5], user_id, db)  # Cache top 5 curations
+            
+        elapsed_time = (datetime.utcnow() - start_time).total_seconds()
+        print(f"🎉 PRE-CACHE: Completed comprehensive vault data pre-caching in {elapsed_time:.2f}s")
+        print(f"   User {user_id} will now experience instant vault loading!")
+        
+    except Exception as e:
+        elapsed_time = (datetime.utcnow() - start_time).total_seconds()
+        print(f"❌ PRE-CACHE: Failed after {elapsed_time:.2f}s for user {user_id}: {e}")
+        # Don't raise the exception to avoid failing the login process
+        import traceback
+        print(f"PRE-CACHE ERROR DETAILS: {traceback.format_exc()}")
+
+async def pre_cache_conversation_content(conversations: list, user_id: str, db: Session):
+    """Pre-cache conversation content for instant access"""
+    try:
+        from app.routes.conversations import get_conversation_by_id
+        
+        cached_count = 0
+        for conversation in conversations:
+            try:
+                conversation_id = conversation.get('id') if isinstance(conversation, dict) else getattr(conversation, 'id', None)
+                if conversation_id:
+                    # Load full conversation content
+                    full_conversation = get_conversation_by_id(conversation_id, user_id, db)
+                    if full_conversation:
+                        cached_count += 1
+                        print(f"   ✅ Pre-cached conversation {conversation_id}")
+            except Exception as e:
+                print(f"   ⚠️ Failed to pre-cache conversation {conversation_id}: {e}")
+                continue
+        
+        print(f"🎯 PRE-CACHE: Successfully pre-cached {cached_count} conversation contents")
+        
+    except Exception as e:
+        print(f"❌ PRE-CACHE: Failed to pre-cache conversation content: {e}")
+
+async def pre_cache_curation_content(curations: list, user_id: str, db: Session):
+    """Pre-cache curation content for instant access"""
+    try:
+        from app.services.curation_service import curation_service
+        
+        cached_count = 0
+        for curation in curations:
+            try:
+                curation_id = curation.get('id') if isinstance(curation, dict) else getattr(curation, 'id', None)
+                if curation_id:
+                    # Pre-generate curation content with default provider using the service directly
+                    content_result = await curation_service.generate_curation_content(
+                        curation_id,
+                        user_id,
+                        db,
+                        provider="gemini",
+                        model="gemini-1.5-flash"
+                    )
+                    if content_result and content_result.get("success"):
+                        cached_count += 1
+                        print(f"   ✅ Pre-cached curation {curation_id}")
+            except Exception as e:
+                print(f"   ⚠️ Failed to pre-cache curation {curation_id}: {e}")
+                continue
+        
+        print(f"🎯 PRE-CACHE: Successfully pre-cached {cached_count} curation contents")
+        
+    except Exception as e:
+        print(f"❌ PRE-CACHE: Failed to pre-cache curation content: {e}")
+
+# Helper functions to get data for specific user (these will be imported from respective route files)
+def get_documents_for_user(user_id: str, db: Session):
+    """Get documents for a specific user"""
+    try:
+        from app.deps import get_current_user_from_id
+        
+        # Get user object
+        user = get_current_user_from_id(user_id, db)
+        if not user:
+            return []
+        
+        # Import and call the actual route function
+        import asyncio
+        from app.routes.documents import get_user_documents
+        
+        # Since get_user_documents is async, we need to run it in the event loop
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(get_user_documents(user, db))
+        except RuntimeError:
+            # If no event loop is running, create a new one
+            return asyncio.run(get_user_documents(user, db))
+    except Exception as e:
+        print(f"Failed to get documents for user {user_id}: {e}")
+        return []
+
+def get_curations_for_user(user_id: str, db: Session):
+    """Get curations for a specific user"""
+    try:
+        from app.deps import get_current_user_from_id
+        
+        # Get user object
+        user = get_current_user_from_id(user_id, db)
+        if not user:
+            return []
+        
+        # Import and call the actual route function
+        import asyncio
+        from app.routes.curations import get_user_curations
+        
+        # Since get_user_curations is async, we need to run it in the event loop
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(get_user_curations(user, db))
+        except RuntimeError:
+            # If no event loop is running, create a new one
+            return asyncio.run(get_user_curations(user, db))
+    except Exception as e:
+        print(f"Failed to get curations for user {user_id}: {e}")
+        return []
+
+def get_conversations_for_user(user_id: str, db: Session):
+    """Get conversations for a specific user"""
+    try:
+        from app.deps import get_current_user_from_id
+        
+        # Get user object
+        user = get_current_user_from_id(user_id, db)
+        if not user:
+            return []
+        
+        # Import and call the actual route function
+        import asyncio
+        from app.routes.conversations import get_conversations
+        
+        # Since get_conversations is async, we need to run it in the event loop
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(get_conversations(limit=50, current_user=user, db=db))
+        except RuntimeError:
+            # If no event loop is running, create a new one
+            return asyncio.run(get_conversations(limit=50, current_user=user, db=db))
+    except Exception as e:
+        print(f"Failed to get conversations for user {user_id}: {e}")
+        return []
+
+def get_summaries_status_for_user(user_id: str, db: Session):
+    """Get summaries status for a specific user"""
+    try:
+        from app.deps import get_current_user_from_id
+        
+        # Get user object
+        user = get_current_user_from_id(user_id, db)
+        if not user:
+            return []
+        
+        # Import and call the actual route function
+        import asyncio
+        from app.routes.summaries import get_summary_status
+        
+        # Since get_summary_status is async, we need to run it in the event loop
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(get_summary_status(user, db))
+        except RuntimeError:
+            # If no event loop is running, create a new one
+            return asyncio.run(get_summary_status(user, db))
+    except Exception as e:
+        print(f"Failed to get summaries status for user {user_id}: {e}")
+        return []
+
+def get_provider_models_for_user(user_id: str, db: Session):
+    """Get provider models for a specific user"""
+    try:
+        from app.deps import get_current_user_from_id
+        
+        # Get user object
+        user = get_current_user_from_id(user_id, db)
+        if not user:
+            return {}
+        
+        # Import and call the actual route function
+        import asyncio
+        from app.routes.providers import get_provider_models
+        
+        # Since get_provider_models is async, we need to run it in the event loop
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(get_provider_models(user))
+        except RuntimeError:
+            # If no event loop is running, create a new one
+            return asyncio.run(get_provider_models(user))
+    except Exception as e:
+        print(f"Failed to get provider models for user {user_id}: {e}")
+        return {}

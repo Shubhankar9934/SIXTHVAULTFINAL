@@ -165,15 +165,15 @@ class SummaryEngine:
         document: Document, 
         user_id: str
     ) -> Optional[Dict]:
-        """Generate a summary for a single document"""
+        """Generate a detailed, fact-oriented summary for a single document (1500-2000 words)"""
         
         try:
             # Read the actual document content
             document_content = read_document_content(document)
             
-            # Create a focused prompt for individual document summary with actual content
+            # Create a comprehensive prompt for detailed individual document summary
             prompt = f"""
-            Generate a comprehensive summary for the following document:
+            Generate a comprehensive, detailed summary for the following document. The summary should be 1500-2000 words and provide an in-depth analysis based strictly on the facts and content present in the document.
             
             Document: {document.filename}
             Existing Summary: {document.summary or "No existing summary"}
@@ -183,15 +183,85 @@ class SummaryEngine:
             DOCUMENT CONTENT:
             {document_content}
             
-            Please provide:
-            1. A concise executive summary (2-3 sentences)
-            2. Key points and findings
-            3. Main themes and topics covered
-            4. Important insights and takeaways
-            5. Actionable recommendations if applicable
+            **CRITICAL REQUIREMENTS - STRICTLY FOLLOW THESE RULES**:
+            - NEVER add percentages, statistics, or numerical data that are not explicitly present in the source document
+            - NEVER fabricate or estimate potential ROI, growth rates, market share, conversion rates, or any quantitative metrics
+            - NEVER use phrases like "potential X% increase", "estimated Y% improvement", "could result in Z% growth", "X-Y% reduction", "increase by X%"
+            - NEVER create dummy percentages or made-up statistics to make the content sound more authoritative
+            - Base ALL insights strictly on the actual content and data present in the provided document
+            - If no specific metrics are provided in the document, focus on qualitative insights only
+            - When referencing data, always ensure it comes directly from the source document
+            - Use phrases like "based on the document", "according to the content", "the document shows" when making claims
+            - If you want to suggest potential impact, use qualitative terms like "significant", "substantial", "notable", "considerable" instead of percentages
+            - TARGET LENGTH: 1500-2000 words for comprehensive coverage
+            - Provide detailed analysis with extensive factual support from the document
             
-            Format the response in clear, professional language suitable for business use.
-            Focus on the most valuable and actionable information from the document content.
+            **REQUIRED DETAILED STRUCTURE**:
+            
+            ## Executive Summary
+            Provide a comprehensive overview of the document's main purpose, scope, and key findings based strictly on the content. Include the document's context, primary objectives, and most significant conclusions drawn from the actual material.
+            
+            ## Document Overview and Context
+            - Document type, purpose, and intended audience based on content analysis
+            - Scope and methodology (if mentioned in the document)
+            - Background information and context provided in the document
+            - Date, authorship, or organizational context if specified in the content
+            
+            ## Detailed Content Analysis
+            ### Primary Findings and Facts
+            - Comprehensive list of all major findings explicitly stated in the document
+            - Detailed examination of data, research results, or conclusions presented
+            - Specific facts, figures, and evidence directly quoted or referenced from the content
+            - Methodological details if provided in the document
+            
+            ### Key Themes and Topics
+            - In-depth analysis of main themes covered in the document
+            - Detailed exploration of subtopics and supporting arguments
+            - Connections between different sections or concepts within the document
+            - Theoretical frameworks or models presented in the content
+            
+            ### Supporting Evidence and Documentation
+            - Detailed review of evidence, case studies, or examples provided
+            - Analysis of supporting data, charts, tables, or appendices mentioned
+            - References to external sources or citations included in the document
+            - Validation methods or quality assurance measures described
+            
+            ## Strategic Insights and Implications
+            ### Business and Operational Implications
+            - Detailed analysis of how findings impact business operations based on document content
+            - Organizational implications explicitly discussed in the document
+            - Process improvements or changes suggested in the content
+            - Resource requirements or constraints mentioned in the document
+            
+            ### Market and Industry Context
+            - Industry-specific insights provided in the document
+            - Competitive landscape analysis if included in the content
+            - Market trends or patterns identified in the document
+            - Regulatory or compliance considerations mentioned
+            
+            ## Actionable Recommendations and Next Steps
+            - Comprehensive list of all recommendations explicitly stated in the document
+            - Detailed action items or implementation steps provided in the content
+            - Priority levels or timelines mentioned in the document
+            - Success metrics or evaluation criteria specified in the content
+            - Risk mitigation strategies or considerations outlined in the document
+            
+            ## Conclusion and Key Takeaways
+            - Summary of the most critical insights derived from the document
+            - Long-term implications based on the content analysis
+            - Areas requiring further investigation as mentioned in the document
+            - Final assessment of the document's value and applicability
+            
+            **FORMATTING REQUIREMENTS**:
+            - Use clear headings and subheadings as shown above
+            - Include bullet points and numbered lists for clarity
+            - Maintain professional, analytical tone throughout
+            - Ensure each section meets the specified word count ranges
+            - Ground every statement in actual document content
+            - Use direct quotes where appropriate to support analysis
+            - Provide comprehensive coverage while avoiding redundancy
+            
+            Focus on creating a thorough, fact-based analysis that serves as a comprehensive reference document for the original content. The summary should be detailed enough that a reader can understand the full scope and implications of the original document without needing to read it directly.
             """
             
             # Generate summary using AI with default provider (can be enhanced to accept provider parameter)
@@ -260,16 +330,28 @@ class SummaryEngine:
             
             Common themes: {', '.join(list(all_tags)[:10])}
             
+            **CRITICAL REQUIREMENTS - STRICTLY FOLLOW THESE RULES**:
+            - NEVER add percentages, statistics, or numerical data that are not explicitly present in the source documents
+            - NEVER fabricate or estimate potential ROI, growth rates, market share, conversion rates, or any quantitative metrics
+            - NEVER use phrases like "potential X% increase", "estimated Y% improvement", "could result in Z% growth", "X-Y% reduction", "increase by X%"
+            - NEVER create dummy percentages or made-up statistics to make the content sound more authoritative
+            - Base ALL insights strictly on the actual content and data present in the provided documents
+            - If no specific metrics are provided in the documents, focus on qualitative insights only
+            - When referencing data, always ensure it comes directly from the source documents
+            - Use phrases like "based on the documents", "according to the content", "the analysis shows" when making claims
+            - If you want to suggest potential impact, use qualitative terms like "significant", "substantial", "notable", "considerable" instead of percentages
+            
             Please provide:
-            1. Executive Overview: High-level synthesis of all documents
-            2. Cross-Document Insights: Key patterns and themes across documents
-            3. Collective Findings: Most important discoveries from the entire set
-            4. Strategic Implications: What these documents mean together
-            5. Recommended Actions: Next steps based on combined analysis
+            1. Executive Overview: High-level synthesis of all documents based strictly on document content
+            2. Cross-Document Insights: Key patterns and themes across documents found in the source material
+            3. Collective Findings: Most important discoveries from the entire set derived from actual content
+            4. Strategic Implications: What these documents mean together based on provided information
+            5. Recommended Actions: Next steps based on combined analysis from document content only
             
             Focus on creating a cohesive narrative that shows how all documents work together
             to provide comprehensive insights. Highlight synergies and complementary information.
-            Base your analysis on the actual document content provided above.
+            Base your analysis strictly on the actual document content provided above.
+            Ground all insights in the actual document content and avoid any fabricated data.
             """
             
             # Generate summary using AI
@@ -351,14 +433,26 @@ class SummaryEngine:
             
             {chr(10).join(doc_info)}
             
+            **CRITICAL REQUIREMENTS - STRICTLY FOLLOW THESE RULES**:
+            - NEVER add percentages, statistics, or numerical data that are not explicitly present in the source documents
+            - NEVER fabricate or estimate potential ROI, growth rates, market share, conversion rates, or any quantitative metrics
+            - NEVER use phrases like "potential X% increase", "estimated Y% improvement", "could result in Z% growth", "X-Y% reduction", "increase by X%"
+            - NEVER create dummy percentages or made-up statistics to make the content sound more authoritative
+            - Base ALL insights strictly on the actual content and data present in the provided documents
+            - If no specific metrics are provided in the documents, focus on qualitative insights only
+            - When referencing data, always ensure it comes directly from the source documents
+            - Use phrases like "based on the documents", "according to the content", "the analysis shows" when making claims
+            - If you want to suggest potential impact, use qualitative terms like "significant", "substantial", "notable", "considerable" instead of percentages
+            
             Please provide:
-            1. Theme Overview: What this theme represents across the documents
-            2. Key Insights: Main findings related to this theme
-            3. Supporting Evidence: Specific examples from the documents
-            4. Implications: What this theme means for decision-making
-            5. Recommendations: Actions related to this theme
+            1. Theme Overview: What this theme represents across the documents based strictly on document content
+            2. Key Insights: Main findings related to this theme derived from actual document content
+            3. Supporting Evidence: Specific examples directly from the documents
+            4. Implications: What this theme means for decision-making based on provided information
+            5. Recommendations: Actions related to this theme if mentioned in the documents
             
             Focus specifically on the "{theme}" aspect and how it appears across the document set.
+            Ground all insights in the actual document content and avoid any fabricated data.
             """
             
             # Generate summary using AI
@@ -483,22 +577,20 @@ class SummaryService:
         self.engine = SummaryEngine()
     
     async def get_user_summaries(self, user_id: str, session: Session) -> List[Dict]:
-        """Get all active summaries for a user's tenant"""
+        """Get all active summaries for a user"""
         
-        # Get user's tenant_id for proper data sharing
-        from app.database import User
-        user = session.exec(select(User).where(User.id == user_id)).first()
-        if not user or not user.tenant_id:
-            return []
+        logger.info(f"Getting summaries for user {user_id}")
         
+        # Get summaries directly by owner_id (no tenant requirement)
         statement = select(AISummary).where(
             and_(
-                AISummary.tenant_id == user.tenant_id,
+                AISummary.owner_id == user_id,
                 AISummary.status.in_(['active', 'stale'])
             )
         ).order_by(AISummary.last_updated.desc())
         
         summaries = session.exec(statement).all()
+        logger.info(f"Found {len(summaries)} summaries in database for user {user_id}")
         
         result = []
         for summary in summaries:
@@ -518,6 +610,7 @@ class SummaryService:
                 'content': summary.summary_content
             })
         
+        logger.info(f"Returning {len(result)} formatted summaries for user {user_id}")
         return result
     
     async def get_user_settings(self, user_id: str, session: Session) -> Dict:
@@ -933,7 +1026,8 @@ class SummaryService:
         keywords: List[str] = None,
         focus_area: Optional[str] = None,
         provider: str = "gemini",
-        model: str = "gemini-1.5-flash"
+        model: str = "gemini-1.5-flash",
+        document_ids: Optional[List[str]] = None
     ) -> Dict:
         """Create a custom AI summary with user-defined focus and keywords"""
         
@@ -947,34 +1041,63 @@ class SummaryService:
             keywords = []
         
         try:
-            # Get user documents to find relevant ones for this summary
-            doc_statement = select(Document).where(Document.owner_id == user_id)
-            documents = session.exec(doc_statement).all()
-            
-            logger.info(f"Found {len(documents)} documents for user {user_id}")
-            
-            if not documents:
-                # Check if there are any documents at all in the database for debugging
-                all_docs_statement = select(Document)
-                all_documents = session.exec(all_docs_statement).all()
-                logger.warning(f"No documents found for user {user_id}. Total documents in database: {len(all_documents)}")
-                
+            # Get user's tenant_id and documents from tenant
+            from app.database import User
+            user = session.exec(select(User).where(User.id == user_id)).first()
+            if not user or not user.tenant_id:
                 return {
                     'success': False,
-                    'message': f'No documents found for user {user_id}. Please upload documents first. Total documents in system: {len(all_documents)}'
+                    'message': 'No tenant found for user'
                 }
             
-            # Find documents relevant to the custom summary
-            relevant_docs = self._find_relevant_documents_for_summary(
-                documents, keywords, title, description, focus_area
-            )
-            
-            if not relevant_docs:
-                # If no specific matches, use all documents
+            # If specific document IDs are provided, use only those documents
+            if document_ids:
+                logger.info(f"Using specific document IDs: {document_ids}")
+                doc_statement = select(Document).where(
+                    and_(
+                        Document.id.in_(document_ids),
+                        Document.tenant_id == user.tenant_id
+                    )
+                )
+                documents = session.exec(doc_statement).all()
+                
+                if not documents:
+                    return {
+                        'success': False,
+                        'message': f'No documents found with the specified IDs: {document_ids}'
+                    }
+                
                 relevant_docs = documents
+                logger.info(f"Found {len(relevant_docs)} documents from specified IDs")
+            else:
+                # Get all documents from user's tenant for proper data sharing
+                doc_statement = select(Document).where(Document.tenant_id == user.tenant_id)
+                documents = session.exec(doc_statement).all()
+                
+                logger.info(f"Found {len(documents)} documents for user {user_id}")
+                
+                if not documents:
+                    # Check if there are any documents at all in the database for debugging
+                    all_docs_statement = select(Document)
+                    all_documents = session.exec(all_docs_statement).all()
+                    logger.warning(f"No documents found for user {user_id}. Total documents in database: {len(all_documents)}")
+                    
+                    return {
+                        'success': False,
+                        'message': f'No documents found for user {user_id}. Please upload documents first. Total documents in system: {len(all_documents)}'
+                    }
+                
+                # Find documents relevant to the custom summary
+                relevant_docs = self._find_relevant_documents_for_summary(
+                    documents, keywords, title, description, focus_area
+                )
+                
+                if not relevant_docs:
+                    # If no specific matches, use all documents
+                    relevant_docs = documents
             
             # Generate custom summary content
-            summary_content = await self._generate_custom_summary_content(
+            summary_content = await self.generate_custom_summary_content(
                 title, description, keywords, focus_area, relevant_docs, provider, model
             )
             
@@ -1076,6 +1199,21 @@ class SummaryService:
         provider: str,
         model: str
     ) -> str:
+        """Generate custom summary content using AI (private method)"""
+        return await self.generate_custom_summary_content(
+            title, description, keywords, focus_area, documents, provider, model
+        )
+    
+    async def generate_custom_summary_content(
+        self,
+        title: str,
+        description: Optional[str],
+        keywords: List[str],
+        focus_area: Optional[str],
+        documents: List[Document],
+        provider: str,
+        model: str
+    ) -> str:
         """Generate custom summary content using AI"""
         
         try:
@@ -1090,7 +1228,7 @@ class SummaryService:
             focus_str = f" with specific focus on {focus_area}" if focus_area else ""
             
             prompt = f"""
-            Generate a custom summary titled "{title}" based on the following requirements:
+            Generate a comprehensive, detailed custom summary titled "{title}" based on the following requirements. The summary should be 1500-2000 words and provide an in-depth analysis based strictly on the facts and content present in the documents.
             
             Description: {description or "Custom analysis of uploaded documents"}
             Keywords/Topics: {keywords_str}
@@ -1099,18 +1237,88 @@ class SummaryService:
             Documents to analyze:
             {chr(10).join(doc_info)}
             
-            Please provide a comprehensive summary that includes:
-            1. Executive Summary: Overview aligned with the specified focus
-            2. Key Findings: Main insights related to the keywords and focus area
-            3. Detailed Analysis: In-depth examination of relevant aspects
-            4. Supporting Evidence: Specific examples from the documents
-            5. Strategic Implications: What these findings mean
-            6. Recommendations: Actionable next steps
+            **CRITICAL REQUIREMENTS - STRICTLY FOLLOW THESE RULES**:
+            - NEVER add percentages, statistics, or numerical data that are not explicitly present in the source documents
+            - NEVER fabricate or estimate potential ROI, growth rates, market share, conversion rates, or any quantitative metrics
+            - NEVER use phrases like "potential X% increase", "estimated Y% improvement", "could result in Z% growth", "X-Y% reduction", "increase by X%"
+            - NEVER create dummy percentages or made-up statistics to make the content sound more authoritative
+            - Base ALL insights strictly on the actual content and data present in the provided documents
+            - If no specific metrics are provided in the documents, focus on qualitative insights only
+            - When referencing data, always ensure it comes directly from the source documents
+            - Use phrases like "based on the documents", "according to the content", "the analysis shows" when making claims
+            - If you want to suggest potential impact, use qualitative terms like "significant", "substantial", "notable", "considerable" instead of percentages
+            - TARGET LENGTH: 1500-2000 words for comprehensive coverage
+            - Provide detailed analysis with extensive factual support from the documents
             
-            Focus specifically on the requested keywords ({keywords_str}) and ensure the analysis
-            addresses the user's specific interests and requirements.
+            **REQUIRED DETAILED STRUCTURE**:
             
-            Format the response using markdown with clear headings and professional structure.
+            ## Executive Summary
+            Provide a comprehensive overview of the custom analysis focused on {keywords_str}. Include the scope of analysis, primary objectives related to the focus area, and most significant conclusions drawn from the document collection. Establish the context and importance of this analysis based strictly on the document content.
+            
+            ## Analysis Scope and Methodology
+            - Define the scope of analysis based on the specified keywords and focus area
+            - Document selection criteria and relevance to the focus area
+            - Analytical approach used to examine the documents
+            - Limitations or constraints identified in the available documentation
+            
+            ## Detailed Findings and Analysis
+            ### Primary Insights Related to {keywords_str}
+            - Comprehensive examination of all findings related to the specified keywords
+            - Detailed analysis of patterns, trends, and themes identified in the documents
+            - Specific evidence and data points directly extracted from the source materials
+            - Cross-document correlations and connections related to the focus area
+            
+            ### Supporting Evidence and Documentation
+            - Detailed review of supporting evidence from each relevant document
+            - Analysis of case studies, examples, or specific instances mentioned
+            - Examination of methodologies, frameworks, or approaches described
+            - Assessment of data quality and reliability based on document content
+            
+            ### Thematic Analysis
+            - In-depth exploration of major themes related to {focus_area or "the focus area"}
+            - Identification of recurring concepts and their significance
+            - Analysis of relationships between different aspects of the topic
+            - Evaluation of consistency or contradictions across documents
+            
+            ## Strategic Implications and Context
+            ### Business and Operational Impact
+            - Detailed analysis of how findings impact operations based on document insights
+            - Organizational implications explicitly discussed in the documents
+            - Process improvements or strategic changes suggested in the content
+            - Resource requirements, constraints, or opportunities identified
+            
+            ### Market and Industry Considerations
+            - Industry-specific insights related to {keywords_str} found in the documents
+            - Competitive landscape analysis if included in the source materials
+            - Market trends, patterns, or dynamics identified in the documentation
+            - Regulatory, compliance, or external factors mentioned in the documents
+            
+            ## Actionable Recommendations and Implementation
+            - Comprehensive list of all recommendations explicitly stated in the documents
+            - Detailed action items or implementation steps related to {keywords_str}
+            - Priority levels, timelines, or sequencing mentioned in the source materials
+            - Success metrics, evaluation criteria, or measurement approaches specified
+            - Risk mitigation strategies or considerations outlined in the documents
+            - Resource allocation or investment requirements identified
+            
+            ## Conclusion and Strategic Outlook
+            - Summary of the most critical insights related to {keywords_str}
+            - Long-term implications and strategic considerations based on the analysis
+            - Areas requiring further investigation or additional documentation
+            - Final assessment of the analysis value and its applicability to {focus_area or "the specified focus area"}
+            - Key takeaways that decision-makers should prioritize
+            
+            **FORMATTING REQUIREMENTS**:
+            - Use clear headings and subheadings as shown above
+            - Include bullet points and numbered lists for clarity
+            - Maintain professional, analytical tone throughout
+            - Ensure each section meets the specified word count ranges
+            - Ground every statement in actual document content
+            - Use direct quotes where appropriate to support analysis
+            - Provide comprehensive coverage while avoiding redundancy
+            - Focus specifically on {keywords_str} and {focus_area or "the specified focus area"} throughout the analysis
+            
+            Focus on creating a thorough, fact-based analysis that serves as a comprehensive reference document for {keywords_str} and {focus_area or "the focus area"}. The summary should be detailed enough that a reader can understand the full scope and implications of the topic without needing to read the original documents directly.
             """
             
             # Use the LLM factory to generate content with the specified provider and model

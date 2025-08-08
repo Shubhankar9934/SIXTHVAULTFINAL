@@ -72,52 +72,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const [loadingState, setLoadingState] = useState<AuthLoadingState | null>(null)
   const loadingManagerRef = useRef<AuthLoadingManager>(new AuthLoadingManager())
-  const apiUrl = process.env.NEXT_PUBLIC_RAG_API_URL || 'http://localhost:8000'
+  const apiUrl = process.env.NEXT_PUBLIC_RAG_API_URL || 'https://sixth-vault.com/api'
   const initializationRef = useRef(false)
   const authOperationRef = useRef<AbortController | null>(null)
   const cleanupTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
-  // Function to set auth cookie - Updated for ngrok compatibility and reliability
+  // Function to set auth cookie
   const setAuthCookie = (token: string) => {
     if (typeof window === 'undefined') return
     
     console.log('Setting auth cookie with token:', token.substring(0, 20) + '...')
     
-    // Check if we're using ngrok (contains .ngrok-free.app or .ngrok.io)
-    const isNgrok = window.location.hostname.includes('ngrok') || 
-                   process.env.NEXT_PUBLIC_RAG_API_URL?.includes('ngrok')
-    
-    // Use different cookie settings for ngrok vs localhost
-    if (isNgrok) {
-      // For ngrok tunnels, use lax samesite and secure flag
+    // Use secure cookie settings for production, lax for development
+    const isProduction = window.location.protocol === 'https:'
+    if (isProduction) {
       document.cookie = `auth-token=${token}; path=/; max-age=604800; samesite=lax; secure`
-      console.log('Auth cookie set for ngrok environment')
+      console.log('Auth cookie set for production environment')
     } else {
-      // For localhost development, use lax samesite for better compatibility
       document.cookie = `auth-token=${token}; path=/; max-age=604800; samesite=lax`
-      console.log('Auth cookie set for localhost environment')
+      console.log('Auth cookie set for development environment')
     }
     
-    // Verify cookie was set immediately and after a delay
-    const immediateCheck = getAuthCookie()
-    if (immediateCheck) {
-      console.log('Auth cookie set successfully (immediate check)')
+    // Verify cookie was set
+    const cookieCheck = getAuthCookie()
+    if (cookieCheck) {
+      console.log('Auth cookie set successfully')
     } else {
       console.warn('Auth cookie not immediately available')
     }
-    
-    // Double-check after a delay
-    setTimeout(() => {
-      const cookieValue = getAuthCookie()
-      if (cookieValue) {
-        console.log('Auth cookie verification successful (delayed check)')
-      } else {
-        console.error('Auth cookie verification failed - cookie not found after setting')
-        // Try setting again with different settings
-        document.cookie = `auth-token=${token}; path=/; max-age=604800`
-        console.log('Retried setting auth cookie with minimal settings')
-      }
-    }, 100)
   }
 
   // Function to remove auth cookie
@@ -276,7 +258,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               'Authorization': `Bearer ${token}`,
               'Cache-Control': 'no-cache',
               'Pragma': 'no-cache',
-              'ngrok-skip-browser-warning': 'true',
             },
             credentials: 'include',
             signal: controller.signal
@@ -391,19 +372,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       let response: Response
       
       try {
+        console.log('AuthContext: Making request to:', `${apiUrl}/auth/login`)
+        console.log('AuthContext: Request headers:', {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
+        })
+        console.log('AuthContext: Request body:', JSON.stringify({ email: normalizedEmail, password: '***' }))
+        
         response = await fetch(`${apiUrl}/auth/login`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
-            'ngrok-skip-browser-warning': 'true'
+            'Accept': 'application/json'
           },
           body: JSON.stringify({ email: normalizedEmail, password }),
-          credentials: 'include',
+          mode: 'cors',
           signal: authOperationRef.current?.signal
         })
+        console.log('AuthContext: Response received, status:', response.status, 'ok:', response.ok)
+        console.log('AuthContext: Response headers:', Object.fromEntries(response.headers.entries()))
       } catch (fetchError: any) {
+        console.error('AuthContext: Fetch error details:', fetchError)
+        console.error('AuthContext: Error name:', fetchError.name)
+        console.error('AuthContext: Error message:', fetchError.message)
+        console.error('AuthContext: Error stack:', fetchError.stack)
+        
         // Only handle actual network/connection errors here
         if (fetchError.name === 'AbortError') {
           throw new Error('Request was cancelled')
@@ -411,7 +406,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (fetchError.name === 'TypeError' && 
             (fetchError.message.includes('Failed to fetch') || 
              fetchError.message.includes('Network request failed') ||
-             fetchError.message.includes('fetch is not defined'))) {
+             fetchError.message.includes('fetch is not defined') ||
+             fetchError.message.includes('NetworkError') ||
+             fetchError.message.includes('ERR_NETWORK'))) {
           throw new Error('Network connection failed. Please check your internet connection and try again.')
         }
         // For other fetch errors, provide a generic connection error
@@ -438,7 +435,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         throw new Error(errorMessage)
       }
 
-      const data = await response.json()
+      let data
+      try {
+        const responseText = await response.text()
+        console.log('AuthContext: Raw response text length:', responseText.length)
+        console.log('AuthContext: Response text preview:', responseText.substring(0, 200))
+        
+        if (!responseText.trim()) {
+          throw new Error('Empty response from server')
+        }
+        
+        data = JSON.parse(responseText)
+        console.log('AuthContext: Login response parsed successfully:', data)
+      } catch (parseError) {
+        console.error('AuthContext: Failed to parse login response:', parseError)
+        throw new Error('Invalid response from server. Please try again.')
+      }
+      
+      // Validate response structure
+      if (!data.access_token) {
+        console.error('AuthContext: No access token in response:', data)
+        throw new Error('Invalid login response - missing access token')
+      }
+      
+      if (!data.user) {
+        console.error('AuthContext: No user data in response:', data)
+        throw new Error('Invalid login response - missing user data')
+      }
+      
       console.log('AuthContext: Login response received, setting auth state')
       
       // Store token in cookie immediately
@@ -506,8 +530,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         response = await fetch(`${apiUrl}/auth/register`, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            'ngrok-skip-browser-warning': 'true'
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify(userData)
         })
@@ -662,8 +685,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         response = await fetch(`${apiUrl}/auth/me`, {
           headers: {
             'Authorization': `Bearer ${token}`,
-            'Cache-Control': 'no-cache',
-            'ngrok-skip-browser-warning': 'true'
+            'Cache-Control': 'no-cache'
           }
         })
       } catch (fetchError: any) {

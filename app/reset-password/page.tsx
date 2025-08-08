@@ -26,7 +26,11 @@ export default function ResetPasswordPage() {
   const token = searchParams.get('token')
 
   useEffect(() => {
+    console.log('Reset password page - token from URL:', token)
+    console.log('Reset password page - searchParams:', searchParams.toString())
+    
     if (!token) {
+      console.log('Reset password page - no token found')
       setTokenValid(false)
       setError("Invalid or missing reset token")
       return

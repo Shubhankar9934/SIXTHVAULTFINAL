@@ -19,20 +19,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/summaries", tags=["AI Summaries"])
 
 @router.get("/", response_model=List[Dict])
+@router.get("", response_model=List[Dict])
 async def get_user_summaries(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
     """Get all summaries for the current user"""
     try:
+        logger.info(f"Getting summaries for user {current_user.id}")
         summaries = await summary_service.get_user_summaries(current_user.id, session)
+        logger.info(f"Found {len(summaries)} summaries for user {current_user.id}")
         return summaries
     except Exception as e:
         logger.error(f"Failed to get summaries for user {current_user.id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve summaries: {str(e)}"
-        )
+        # Return empty list instead of error to prevent 404s
+        logger.warning(f"Returning empty summaries list for user {current_user.id}")
+        return []
 
 @router.post("/generate")
 async def generate_summaries(
@@ -144,10 +146,15 @@ async def create_custom_summary(
         focus_area = request_data.get("focusArea")
         provider = request_data.get("provider", "ollama")
         model = request_data.get("model", "llama3.2")
+        document_ids = request_data.get("documentIds", [])
         
         # Ensure keywords is a list
         if isinstance(keywords, str):
             keywords = [kw.strip() for kw in keywords.split(",") if kw.strip()]
+        
+        # Ensure document_ids is a list
+        if isinstance(document_ids, str):
+            document_ids = [doc_id.strip() for doc_id in document_ids.split(",") if doc_id.strip()]
         
         result = await summary_service.create_custom_summary(
             user_id=current_user.id,
@@ -157,7 +164,8 @@ async def create_custom_summary(
             keywords=keywords,
             focus_area=focus_area,
             provider=provider,
-            model=model
+            model=model,
+            document_ids=document_ids
         )
         
         return result
@@ -303,9 +311,18 @@ async def refresh_summary(
             model = request_data.get("model", model)
         
         # Get documents for this summary
+        # Get user's tenant_id first
+        from app.database import User
+        user = session.exec(select(User).where(User.id == current_user.id)).first()
+        if not user or not user.tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No tenant found for user"
+            )
+        
         doc_statement = select(Document).where(
             Document.id.in_(summary.document_ids),
-            Document.owner_id == current_user.id
+            Document.tenant_id == user.tenant_id
         )
         documents = session.exec(doc_statement).all()
         
@@ -318,7 +335,7 @@ async def refresh_summary(
         # Regenerate content based on summary type
         if summary.summary_type == "custom":
             # For custom summaries, regenerate with original parameters using specified provider/model
-            new_content = await summary_service._generate_custom_summary_content(
+            new_content = await summary_service.generate_custom_summary_content(
                 title=summary.title,
                 description=summary.description,
                 keywords=summary.focus_keywords,
@@ -456,6 +473,136 @@ async def get_summary_content(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve summary content: {str(e)}"
+        )
+
+@router.post("/{summary_id}/generate-content")
+async def generate_summary_content(
+    summary_id: str,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """Generate content for an existing summary"""
+    try:
+        from sqlmodel import select
+        from app.models import AISummary, Document
+        
+        # Find the summary
+        statement = select(AISummary).where(
+            AISummary.id == summary_id,
+            AISummary.owner_id == current_user.id
+        )
+        summary = session.exec(statement).first()
+        
+        if not summary:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Summary not found"
+            )
+        
+        # Get documents for this summary
+        # Get user's tenant_id first
+        from app.database import User
+        user = session.exec(select(User).where(User.id == current_user.id)).first()
+        if not user or not user.tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No tenant found for user"
+            )
+        
+        doc_statement = select(Document).where(
+            Document.id.in_(summary.document_ids),
+            Document.tenant_id == user.tenant_id
+        )
+        documents = session.exec(doc_statement).all()
+        
+        if not documents:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No documents found for this summary"
+            )
+        
+        # Generate content based on summary type
+        new_content = None
+        
+        if summary.summary_type == "custom":
+            # For custom summaries, regenerate with original parameters
+            new_content = await summary_service.generate_custom_summary_content(
+                title=summary.title,
+                description=summary.description,
+                keywords=summary.focus_keywords,
+                focus_area=None,
+                documents=documents,
+                provider="ollama",  # Default provider
+                model="llama3.2"    # Default model
+            )
+        else:
+            # For auto-generated summaries, use the engine
+            if summary.summary_type == "individual" and len(documents) == 1:
+                summary_data = await summary_service.engine._generate_individual_summary(
+                    documents[0], current_user.id
+                )
+                new_content = summary_data['summary_content'] if summary_data else None
+            elif summary.summary_type == "combined":
+                summary_data = await summary_service.engine._generate_combined_summary(
+                    documents, current_user.id
+                )
+                new_content = summary_data['summary_content'] if summary_data else None
+            elif summary.summary_type == "thematic":
+                # For thematic, use the first keyword as theme
+                theme = summary.focus_keywords[0] if summary.focus_keywords else "general"
+                summary_data = await summary_service.engine._generate_thematic_summary(
+                    theme, documents, current_user.id
+                )
+                new_content = summary_data['summary_content'] if summary_data else None
+            else:
+                # Fallback to combined summary
+                summary_data = await summary_service.engine._generate_combined_summary(
+                    documents, current_user.id
+                )
+                new_content = summary_data['summary_content'] if summary_data else None
+        
+        if not new_content:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate summary content"
+            )
+        
+        # Update the summary
+        import datetime as dt
+        summary.summary_content = new_content
+        summary.content_length = len(new_content)
+        summary.last_updated = dt.datetime.utcnow()
+        summary.status = 'active'
+        
+        session.commit()
+        session.refresh(summary)
+        
+        return {
+            "summary_id": summary_id,
+            "content": new_content,
+            "status": "completed",
+            "contentLength": len(new_content),
+            "lastUpdated": summary.last_updated.isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating summary content for {summary_id}: {str(e)}")
+        # Update summary status to failed
+        try:
+            from sqlmodel import select
+            from app.models import AISummary
+            statement = select(AISummary).where(AISummary.id == summary_id)
+            summary = session.exec(statement).first()
+            if summary:
+                summary.status = "failed"
+                session.commit()
+        except:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate summary content: {str(e)}"
         )
 
 @router.post("/bulk-delete")

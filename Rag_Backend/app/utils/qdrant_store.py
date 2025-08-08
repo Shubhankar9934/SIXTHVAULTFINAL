@@ -22,8 +22,8 @@ from app.config import settings
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as q
 
-# ---------- ULTRA-FAST OPTIMIZED EMBEDDER - Pre-loaded Models -------------------------
-# CRITICAL OPTIMIZATION: Pre-load models at startup, never reload during requests
+# ---------- LAZY-LOADED OPTIMIZED EMBEDDER - On-Demand Model Loading -------------------------
+# STARTUP OPTIMIZATION: Load models on first use for faster server startup
 # Hit Rate: 0.938, MRR: 0.868 - Best performing model
 
 import threading
@@ -41,7 +41,7 @@ _model_load_time = 0
 _thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="embedding")
 
 def _initialize_embedding_model():
-    """ULTRA-FAST: Initialize model once at startup, cache forever"""
+    """LAZY LOADING: Initialize model on first use for faster server startup"""
     global _model, _model_loaded, _model_load_time
     
     # Thread-safe check - return immediately if already loaded
@@ -54,7 +54,8 @@ def _initialize_embedding_model():
             return _model
         
         try:
-            print(f"🚀 Loading optimal embedding model: {_model_name}")
+            print(f"🚀 Loading embedding model on first use: {_model_name}")
+            print("   (This enables faster server startup - model loads only when needed)")
             start_time = time.time()
             _model = SentenceTransformer(_model_name)
             _model_load_time = time.time() - start_time

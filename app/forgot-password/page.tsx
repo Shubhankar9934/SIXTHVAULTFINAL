@@ -92,13 +92,22 @@ export default function ForgotPasswordPage() {
       })
 
       const data = await response.json()
+      console.log('Frontend verify response status:', response.status)
+      console.log('Frontend verify response data:', JSON.stringify(data, null, 2))
 
       if (!response.ok) {
         throw new Error(data.message || 'Invalid verification code')
       }
 
+      console.log('Reset token received:', data.resetToken)
+      if (!data.resetToken) {
+        throw new Error('No reset token received from server')
+      }
+
       // Redirect to reset password page with token
-      router.push(`/reset-password?token=${data.resetToken}&email=${encodeURIComponent(email)}`)
+      const redirectUrl = `/reset-password?token=${data.resetToken}&email=${encodeURIComponent(email)}`
+      console.log('Redirecting to:', redirectUrl)
+      router.push(redirectUrl)
     } catch (error) {
       setError(error instanceof Error ? error.message : "Invalid verification code. Please try again.")
       setVerificationCode("")

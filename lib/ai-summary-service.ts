@@ -63,6 +63,7 @@ export interface CustomSummaryRequest {
   focusArea?: string;
   provider?: string;
   model?: string;
+  documentIds?: string[]; // Add this to specify which documents to use
 }
 
 export interface SummaryContent {
@@ -77,6 +78,25 @@ class AISummaryService {
   private baseUrl = '/summaries';
 
   /**
+   * Initialize the AI Summary service
+   * This method can be used to set up any necessary configurations or cache
+   */
+  async initialize(): Promise<void> {
+    try {
+      console.log('🔄 AI Summary Service: Initializing...')
+      
+      // Optionally pre-load summary settings or status for better performance
+      // This is a lightweight operation that doesn't require heavy processing
+      await this.getSummaryStatus()
+      
+      console.log('✅ AI Summary Service: Initialized successfully')
+    } catch (error) {
+      console.warn('⚠️ AI Summary Service: Initialization failed, but service will still work:', error)
+      // Don't throw error - service should still be usable even if initialization fails
+    }
+  }
+
+  /**
    * Get all summaries for the current user
    */
   async getUserSummaries(): Promise<AISummary[]> {
@@ -85,15 +105,20 @@ class AISummaryService {
         method: 'GET',
         headers: ragApiClient['getAuthHeaders']()
       });
-      
+
       if (!response.ok) {
+        if (response.status === 404) {
+          console.log('No summaries found, returning empty array');
+          return [];
+        }
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error('Failed to fetch user summaries:', error);
-      throw new Error('Failed to fetch summaries');
+      // Return empty array instead of throwing to prevent UI crashes
+      return [];
     }
   }
 
@@ -116,11 +141,11 @@ class AISummaryService {
           triggerEvent
         })
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error('Failed to generate summaries:', error);
@@ -137,11 +162,11 @@ class AISummaryService {
         method: 'GET',
         headers: ragApiClient['getAuthHeaders']()
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error('Failed to fetch summary settings:', error);
@@ -166,11 +191,11 @@ class AISummaryService {
         },
         body: JSON.stringify(settings)
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error('Failed to update summary settings:', error);
@@ -187,11 +212,11 @@ class AISummaryService {
         method: 'GET',
         headers: ragApiClient['getAuthHeaders']()
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error('Failed to fetch summary status:', error);
@@ -201,13 +226,37 @@ class AISummaryService {
 
   /**
    * Create a custom summary with user-defined focus and keywords
+   * Supports both object parameter and individual parameters for backward compatibility
    */
-  async createCustomSummary(request: CustomSummaryRequest): Promise<{
+  async createCustomSummary(
+    titleOrRequest: string | CustomSummaryRequest,
+    description?: string,
+    summaryType?: string,
+    provider?: string,
+    model?: string
+  ): Promise<{
     success: boolean;
     message: string;
     summary?: AISummary;
   }> {
     try {
+      let request: CustomSummaryRequest;
+
+      // Handle both parameter styles
+      if (typeof titleOrRequest === 'string') {
+        // Individual parameters style
+        request = {
+          title: titleOrRequest,
+          description: description,
+          keywords: summaryType ? [summaryType] : [],
+          provider: provider,
+          model: model
+        };
+      } else {
+        // Object parameter style
+        request = titleOrRequest;
+      }
+
       const response = await fetch(`${ragApiClient['baseUrl']}${this.baseUrl}/custom`, {
         method: 'POST',
         headers: {
@@ -216,11 +265,11 @@ class AISummaryService {
         },
         body: JSON.stringify(request)
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error('Failed to create custom summary:', error);
@@ -237,11 +286,11 @@ class AISummaryService {
         method: 'GET',
         headers: ragApiClient['getAuthHeaders']()
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error(`Failed to fetch summary ${summaryId}:`, error);
@@ -261,11 +310,11 @@ class AISummaryService {
         method: 'DELETE',
         headers: ragApiClient['getAuthHeaders']()
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error(`Failed to delete summary ${summaryId}:`, error);
@@ -297,11 +346,11 @@ class AISummaryService {
           model
         })
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error(`Failed to refresh summary ${summaryId}:`, error);
@@ -318,15 +367,38 @@ class AISummaryService {
         method: 'GET',
         headers: ragApiClient['getAuthHeaders']()
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error(`Failed to fetch summary content ${summaryId}:`, error);
       throw new Error('Failed to fetch summary content');
+    }
+  }
+
+  /**
+   * Generate content for a specific summary
+   * This method generates or regenerates the content for a summary
+   */
+  async generateSummaryContent(summaryId: string): Promise<string> {
+    try {
+      const response = await fetch(`${ragApiClient['baseUrl']}${this.baseUrl}/${summaryId}/generate-content`, {
+        method: 'POST',
+        headers: ragApiClient['getAuthHeaders']()
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const result = await response.json();
+      return result.content || result.summary?.content || 'Summary content generated successfully';
+    } catch (error) {
+      console.error(`Failed to generate summary content ${summaryId}:`, error);
+      throw new Error('Failed to generate summary content');
     }
   }
 
@@ -350,11 +422,11 @@ class AISummaryService {
           summaryIds
         })
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error('Failed to bulk delete summaries:', error);
@@ -376,11 +448,11 @@ class AISummaryService {
         method: 'POST',
         headers: ragApiClient['getAuthHeaders']()
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error('Failed to archive stale summaries:', error);
@@ -407,11 +479,11 @@ class AISummaryService {
           documentIds
         })
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error('Failed to handle document addition:', error);
@@ -442,11 +514,11 @@ class AISummaryService {
           documentIds
         })
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       return await response.json();
     } catch (error) {
       console.error('Failed to handle document deletion:', error);
@@ -487,8 +559,8 @@ class AISummaryService {
     try {
       const summaries = await this.getUserSummaries();
       const lowerKeyword = keyword.toLowerCase();
-      
-      return summaries.filter(summary => 
+
+      return summaries.filter(summary =>
         summary.title.toLowerCase().includes(lowerKeyword) ||
         summary.description.toLowerCase().includes(lowerKeyword) ||
         summary.keywords.some(k => k.toLowerCase().includes(lowerKeyword)) ||
@@ -515,7 +587,7 @@ class AISummaryService {
   }> {
     try {
       const summaries = await this.getUserSummaries();
-      
+
       const summariesByType: Record<string, number> = {};
       const summariesByStatus: Record<string, number> = {};
       let totalConfidence = 0;
@@ -527,15 +599,15 @@ class AISummaryService {
       summaries.forEach(summary => {
         // Count by type
         summariesByType[summary.summaryType] = (summariesByType[summary.summaryType] || 0) + 1;
-        
+
         // Count by status
         summariesByStatus[summary.status] = (summariesByStatus[summary.status] || 0) + 1;
-        
+
         // Accumulate metrics
         totalConfidence += summary.confidence;
         totalDocumentCount += summary.documentCount;
         totalContentLength += summary.contentLength;
-        
+
         if (summary.autoGenerated) {
           autoGeneratedCount++;
         } else {
@@ -565,11 +637,11 @@ class AISummaryService {
   async exportSummaries(format: 'json' | 'csv' | 'markdown' = 'json'): Promise<string> {
     try {
       const summaries = await this.getUserSummaries();
-      
+
       switch (format) {
         case 'json':
           return JSON.stringify(summaries, null, 2);
-          
+
         case 'csv':
           const headers = ['ID', 'Title', 'Type', 'Status', 'Confidence', 'Document Count', 'Last Updated'];
           const rows = summaries.map(s => [
@@ -582,7 +654,7 @@ class AISummaryService {
             s.lastUpdated
           ]);
           return [headers, ...rows].map(row => row.join(',')).join('\n');
-          
+
         case 'markdown':
           let markdown = '# AI Summaries Export\n\n';
           summaries.forEach(summary => {
@@ -596,7 +668,7 @@ class AISummaryService {
             markdown += `### Content\n\n${summary.content}\n\n---\n\n`;
           });
           return markdown;
-          
+
         default:
           throw new Error(`Unsupported export format: ${format}`);
       }

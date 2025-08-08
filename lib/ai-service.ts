@@ -1,8 +1,8 @@
 import { generateText, streamText } from "ai"
 import { createGroq } from "@ai-sdk/groq"
 
-// Use the provided GROQ API key - available for all users
-const groqApiKey = "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"
+// Get GROQ API key from environment variables
+const groqApiKey = process.env.NEXT_PUBLIC_GROQ_API_KEY || "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"
 let groqClient: any = null
 
 // Function to initialize the GROQ client - always succeeds

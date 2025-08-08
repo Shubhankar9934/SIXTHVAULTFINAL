@@ -38,11 +38,13 @@ export async function POST(request: NextRequest) {
       },
       body: JSON.stringify({
         email: email.toLowerCase().trim(),
-        verification_code: verificationCode.toUpperCase()
+        verificationCode: verificationCode.toUpperCase()
       }),
     })
 
     const data = await response.json()
+    console.log('Backend response status:', response.status)
+    console.log('Backend response data:', JSON.stringify(data, null, 2))
 
     if (!response.ok) {
       // Extract error message from FastAPI response
@@ -52,6 +54,7 @@ export async function POST(request: NextRequest) {
           ? data.detail 
           : data.detail.msg || data.detail.message || JSON.stringify(data.detail)
       }
+      console.error('Backend error response:', errorMessage)
       return NextResponse.json(
         { message: errorMessage },
         { status: response.status }
@@ -59,9 +62,24 @@ export async function POST(request: NextRequest) {
     }
 
     // Return the reset token for the next step
+    const resetToken = data.reset_token || data.resetToken
+    console.log('Available keys in response:', Object.keys(data))
+    console.log('Extracted reset token:', resetToken)
+    console.log('data.reset_token:', data.reset_token)
+    console.log('data.resetToken:', data.resetToken)
+    
+    if (!resetToken) {
+      console.error('No reset token received from backend. Full response:', JSON.stringify(data, null, 2))
+      return NextResponse.json(
+        { message: 'Failed to generate reset token' },
+        { status: 500 }
+      )
+    }
+    
+    console.log('Returning successful response with resetToken:', resetToken)
     return NextResponse.json({
       message: 'Verification code verified successfully',
-      resetToken: data.reset_token
+      resetToken: resetToken
     })
 
   } catch (error) {

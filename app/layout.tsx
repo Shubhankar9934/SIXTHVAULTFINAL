@@ -1,8 +1,9 @@
 import type React from "react"
-import type { Metadata } from "next"
+import type { Metadata, Viewport } from "next"
 import { Inter } from "next/font/google"
 import "./globals.css"
 import { AuthProvider } from "@/lib/auth-context"
+import { VaultStateProvider } from "@/lib/vault-state-provider"
 import ClientOnly from "@/components/client-only"
 
 const inter = Inter({ 
@@ -17,6 +18,12 @@ export const metadata: Metadata = {
   generator: 'v0.dev'
 }
 
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 5
+}
+
 export default function RootLayout({
   children,
 }: {
@@ -27,7 +34,9 @@ export default function RootLayout({
       <body className={inter.className} suppressHydrationWarning={true}>
         <ClientOnly fallback={<div className="min-h-screen flex items-center justify-center">Loading...</div>}>
           <AuthProvider>
-            {children}
+            <VaultStateProvider>
+              {children}
+            </VaultStateProvider>
           </AuthProvider>
         </ClientOnly>
       </body>
