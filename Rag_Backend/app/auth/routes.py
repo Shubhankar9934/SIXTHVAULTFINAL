@@ -193,11 +193,26 @@ class VerificationRequest(BaseModel):
 @router.post("/verify")
 async def verify_email(request: VerificationRequest, db: Session = Depends(get_session)):
     """Verify user email with verification code"""
-    email = request.email.lower()
+    email = request.email.lower().strip()
+    
+    # Sanitize and validate input verification code
+    input_code = request.verification_code.strip().upper() if request.verification_code else ""
+    
+    # Remove any non-alphanumeric characters (spaces, dashes, etc.)
+    input_code = ''.join(c for c in input_code if c.isalnum())
+    
+    # Validate code format
+    if not input_code or len(input_code) != 6:
+        print(f"Verification failed - Invalid code format. Input: '{request.verification_code}', Sanitized: '{input_code}', Length: {len(input_code)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification code must be exactly 6 characters (letters and numbers only)"
+        )
     
     # Check temp_users first
     temp_user = db.exec(select(TempUser).where(TempUser.email == email)).first()
     if not temp_user:
+        print(f"Verification failed - No temp user found for email: {email}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Registration not found. Please register again."
@@ -205,6 +220,7 @@ async def verify_email(request: VerificationRequest, db: Session = Depends(get_s
     
     # Check if verification code has expired
     if temp_user.verification_code_expires_at < datetime.utcnow():
+        print(f"Verification failed - Code expired for email: {email}. Expired at: {temp_user.verification_code_expires_at}, Current time: {datetime.utcnow()}")
         # Delete expired temp user
         db.delete(temp_user)
         db.commit()
@@ -213,11 +229,24 @@ async def verify_email(request: VerificationRequest, db: Session = Depends(get_s
             detail="Verification code has expired. Please register again."
         )
 
-    if temp_user.verification_code != request.verification_code.upper():
+    # Sanitize stored code as well (ensure consistency)
+    stored_code = temp_user.verification_code.strip().upper()
+    
+    # Debug logging (remove in production)
+    print(f"Verification attempt for email: {email}")
+    print(f"Original input: '{request.verification_code}'")
+    print(f"Sanitized input: '{input_code}'")
+    print(f"Stored code: '{stored_code}'")
+    print(f"Codes match: {stored_code == input_code}")
+    
+    if stored_code != input_code:
+        print(f"Verification failed - Code mismatch for email: {email}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid verification code"
+            detail="Invalid verification code. Please check the code and try again."
         )
+    
+    print(f"Verification successful for email: {email}")
     
     try:
         # Import Tenant model
@@ -407,12 +436,39 @@ async def verify_reset_code(request: VerifyResetCodeRequest, db: Session = Depen
                 detail="Verification code has expired. Please request a new one."
             )
         
-        # Verify the code
-        if user.reset_token != request.verification_code.upper():
+        # Sanitize and validate input verification code
+        input_code = request.verification_code.strip().upper() if request.verification_code else ""
+        
+        # Remove any non-alphanumeric characters
+        input_code = ''.join(c for c in input_code if c.isalnum())
+        
+        # Validate code format
+        if not input_code or len(input_code) != 6:
+            print(f"Password reset verification failed - Invalid code format. Input: '{request.verification_code}', Sanitized: '{input_code}'")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid verification code"
+                detail="Verification code must be exactly 6 characters (letters and numbers only)"
             )
+        
+        # Sanitize stored code as well
+        stored_code = user.reset_token.strip().upper()
+        
+        # Debug logging
+        print(f"Password reset verification attempt for email: {email}")
+        print(f"Original input: '{request.verification_code}'")
+        print(f"Sanitized input: '{input_code}'")
+        print(f"Stored code: '{stored_code}'")
+        print(f"Codes match: {stored_code == input_code}")
+        
+        # Verify the code
+        if stored_code != input_code:
+            print(f"Password reset verification failed - Code mismatch for email: {email}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid verification code. Please check the code and try again."
+            )
+        
+        print(f"Password reset verification successful for email: {email}")
         
         # Generate a new secure reset token for password change
         reset_token = secrets.token_urlsafe(32)
