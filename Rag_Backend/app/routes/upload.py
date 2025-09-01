@@ -10,7 +10,7 @@ from app.utils.broadcast import (
 )
 from app.utils.s3_storage import save_upload_file, s3_service, check_s3_health
 from app.services.pipeline import lightning_process_file, enhanced_bulk_process_file
-from app.deps import get_current_user
+from app.deps import get_current_user, get_current_user_with_tenant, get_current_tenant_id_dependency
 from app.config import settings
 from app.services.processing_service import ProcessingService, ProcessingStatus
 from app.utils.s3_storage import save_upload_file, s3_service, check_s3_health, cleanup_file_resources
@@ -403,7 +403,8 @@ async def enhanced_process_file(user_id: str, batch: str, file_info: Dict[str, A
 async def upload(
     background: BackgroundTasks,
     files: list[UploadFile] = File(...),
-    user = Depends(get_current_user),
+    user = Depends(get_current_user_with_tenant),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     sequential: bool = Query(default=False, description="Process files sequentially (one at a time)")
 ):
     """Enhanced file upload endpoint with sequential processing option"""
@@ -748,7 +749,8 @@ async def process_single_file_sync(user_id: str, batch: str, file_info: Dict[str
 async def bulk_upload_enhanced(
     background: BackgroundTasks,
     files: list[UploadFile] = File(...),
-    user = Depends(get_current_user),
+    user = Depends(get_current_user_with_tenant),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
 ):
     """Enhanced bulk upload with two-tier processing strategy"""
     batch = str(uuid4())

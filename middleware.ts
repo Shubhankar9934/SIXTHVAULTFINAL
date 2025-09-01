@@ -152,9 +152,12 @@ export function middleware(request: NextRequest) {
       // Decode the payload (we can't verify signature in middleware without the secret)
       const payload = JSON.parse(atob(parts[1])) as TokenPayload
       
-      // Check if token is expired
-      if (Date.now() >= payload.exp * 1000) {
-        console.log('Middleware: Token expired')
+      // Check if token is expired (removed problematic buffer)
+      const now = Date.now()
+      const expiry = payload.exp * 1000
+      
+      if (now >= expiry) {
+        console.log(`Middleware: Token expired. Now: ${now}, Expiry: ${expiry}`)
         return null
       }
       
@@ -192,37 +195,15 @@ export function middleware(request: NextRequest) {
       return response
 
     case 'protected':
-      // Check auth token and role access
-      if (!tokenPayload) {
+      // Simplified: Just check if token exists, let backend handle validation
+      if (!token) {
         return redirectToLogin()
       }
 
-      try {
-        // Check if user has access to the requested route
-        const routeRoleEntry = Object.entries(PROTECTED_ROUTES).find(([_, routes]) =>
-          routes.some(route => pathname.startsWith(route))
-        )
-
-        if (!routeRoleEntry) {
-          // Route not found in protected routes, deny access
-          return redirectToLogin()
-        }
-
-        const requiredRole = routeRoleEntry[0] as UserRole
-        
-        // Check if user's role has access to the required role level
-        // A user can access routes for their role and lower privilege roles
-        if (!hasRoleAccess(tokenPayload.role, requiredRole)) {
-          console.log(`Middleware: Access denied. User role: ${tokenPayload.role}, Required: ${requiredRole}`)
-          return redirectToLogin()
-        }
-
-        console.log(`Middleware: Access granted. User role: ${tokenPayload.role}, Required: ${requiredRole}`)
-        return response
-      } catch (error) {
-        console.log('Middleware: Error in role validation:', error)
-        return redirectToLogin()
-      }
+      // Let the backend handle all authentication and authorization
+      // The frontend middleware should not duplicate backend logic
+      console.log(`Middleware: Token present, allowing access to ${pathname}`)
+      return response
 
     case 'verification':
       // For verification routes, only check that at least one param exists

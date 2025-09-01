@@ -53,6 +53,8 @@ import {
   Minus,
   LogOut,
   History,
+  Upload,
+  Mail,
 } from "lucide-react"
 import {
   Command,
@@ -84,7 +86,12 @@ import { RouteGuard } from "@/components/route-guard"
 import { useAuth } from "@/lib/auth-context"
 import { useVaultState } from "@/lib/vault-state-provider"
 import { cacheManager } from "@/lib/cache-manager"
+import { vaultLoadingManager } from "@/lib/vault-loading-manager"
+import { VaultLoadingOverlay } from "@/components/ui/vault-loading-overlay"
+import { formatContentWithMath, containsMath } from "@/components/ui/math-renderer"
 import HistorySection from "./history-section"
+import { EmailShareModal } from '@/components/email-share-modal'
+import { useEmailShare, getUserInfoForEmail } from '@/hooks/use-email-share'
 
 function VaultPageContent() {
   const { logout, user } = useAuth()
@@ -115,6 +122,9 @@ function VaultPageContent() {
     startNewConversation,
   } = useVaultState()
 
+  // Loading state for vault initialization
+  const [loadingState, setLoadingState] = useState(vaultLoadingManager.getCurrentState())
+
   // Local state for modals and input
   const [documentSelectorOpen, setDocumentSelectorOpen] = useState(false)
   const [inputMessage, setInputMessage] = useState("")
@@ -134,6 +144,13 @@ function VaultPageContent() {
   const [customSummaryFocusArea, setCustomSummaryFocusArea] = useState("")
   const [isCreatingCustomSummary, setIsCreatingCustomSummary] = useState(false)
 
+  // Email sharing functionality
+  const userInfo = getUserInfoForEmail()
+  const emailShare = useEmailShare({
+    defaultSenderName: userInfo.senderName,
+    defaultSenderCompany: userInfo.senderCompany
+  })
+
   // Extract state values for easier access
   const {
     documents: { data: documents, availableTags, selectedFiles },
@@ -143,6 +160,15 @@ function VaultPageContent() {
     ui: { activeTab, sidebarOpen, sidebarExpanded, expandedSources, expandedRelevance },
     settings: { selectedProvider, selectedModel, availableModels, modelProviders, keepContext, maxContext, searchTag }
   } = state
+
+  // Subscribe to loading state changes
+  useEffect(() => {
+    const unsubscribe = vaultLoadingManager.subscribe((newState) => {
+      setLoadingState(newState)
+    })
+
+    return unsubscribe
+  }, [])
 
   // Cross-tab document deletion listener
   useEffect(() => {
@@ -376,41 +402,10 @@ function VaultPageContent() {
     }
   }
 
-  // Function to format content with better typography
+  // Function to format content with better typography and math support
   const formatContent = (content: string) => {
-    // Remove text-based separators (equals signs and dashes)
-    let formattedContent = content
-      .replace(/^=+$/gm, "")
-      .replace(/^-+$/gm, "")
-      .replace(/^_+$/gm, "")
-      .replace(/^\*+$/gm, "")
-
-    // Replace markdown headings with styled headings
-    formattedContent = formattedContent
-      .replace(/^# (.*?)$/gm, '<h1 class="text-2xl font-bold mb-6 pb-3 border-b-2 border-gradient-to-r from-blue-500 to-purple-600 text-slate-800">$1</h1>')
-      .replace(/^## (.*?)$/gm, '<h2 class="text-xl font-semibold mt-8 mb-4 pb-2 border-b border-slate-200 text-slate-700">$1</h2>')
-      .replace(/^### (.*?)$/gm, '<h3 class="text-lg font-medium mt-6 mb-3 text-slate-600">$1</h3>')
-
-      // Format lists
-      .replace(/^\* (.*?)$/gm, '<li class="ml-4 list-disc my-2 text-slate-700">$1</li>')
-      .replace(/^\d+\. (.*?)$/gm, '<li class="ml-4 list-decimal my-2 text-slate-700">$1</li>')
-
-      // Format bold and italic
-      .replace(/\*\*(.*?)\*\*/g, '<strong class="font-semibold text-slate-800">$1</strong>')
-      .replace(/\*(.*?)\*/g, '<em class="italic text-slate-600">$1</em>')
-
-      // Format paragraphs
-      .replace(/\n\n/g, '</p><p class="my-4 text-slate-700 leading-relaxed">')
-
-      // Format line breaks
-      .replace(/\n/g, "<br>")
-
-    // Wrap in paragraph if not already
-    if (!formattedContent.startsWith("<h") && !formattedContent.startsWith("<p")) {
-      formattedContent = `<p class="my-4 text-slate-700 leading-relaxed">${formattedContent}</p>`
-    }
-
-    return formattedContent
+    // Use the enhanced math-enabled formatter
+    return formatContentWithMath(content)
   }
 
   const handleConversationSelect = (conversationId: string) => {
@@ -467,8 +462,79 @@ function VaultPageContent() {
     }
   }
 
+  // Email sharing functions
+  const shareCurationAsEmail = async (curation: any, event: React.MouseEvent) => {
+    event.stopPropagation()
+    
+    try {
+      // Get the latest content for this curation from chat messages
+      const curationMessage = chatMessages.find(msg => 
+        msg.type === "curation" && msg.title === curation.title
+      )
+      
+      if (curationMessage && curationMessage.content) {
+        emailShare.shareCuration({
+          title: curation.title,
+          content: curationMessage.content,
+          sources: curationMessage.documentNames?.map(name => ({ name, id: name })) || [],
+          metadata: {
+            provider: selectedProvider,
+            model: selectedModel,
+            documentCount: curationMessage.documentsUsed || 0,
+            keywords: curation.keywords || []
+          }
+        })
+      } else {
+        // If no content available, show a message
+        console.log('No content available for curation:', curation.title)
+      }
+    } catch (error) {
+      console.error('Failed to share curation as email:', error)
+    }
+  }
+
+  const shareSummaryAsEmail = async (summary: any, event: React.MouseEvent) => {
+    event.stopPropagation()
+    
+    try {
+      // Get the latest content for this summary from chat messages
+      const summaryMessage = chatMessages.find(msg => 
+        msg.type === "summary" && msg.title === summary.name
+      )
+      
+      if (summaryMessage && summaryMessage.content) {
+        emailShare.shareSummary({
+          title: summary.name,
+          content: summaryMessage.content,
+          sources: summaryMessage.documentNames?.map(name => ({ name, id: name })) || [],
+          metadata: {
+            provider: selectedProvider,
+            model: selectedModel,
+            documentCount: summaryMessage.documentsUsed || 0,
+            summaryType: 'AI Generated'
+          }
+        })
+      } else {
+        // If no content available, show a message
+        console.log('No content available for summary:', summary.name)
+      }
+    } catch (error) {
+      console.error('Failed to share summary as email:', error)
+    }
+  }
+
   return (
-    <div className="h-screen bg-white overflow-hidden relative mobile-safe-top mobile-safe-bottom">
+    <>
+      {/* Vault Loading Overlay */}
+      <VaultLoadingOverlay
+        isVisible={loadingState.isVisible}
+        currentStep={loadingState.currentStep}
+        progress={loadingState.progress}
+        steps={loadingState.steps}
+        message={loadingState.message}
+      />
+
+      <div className="h-screen bg-white overflow-hidden relative mobile-safe-top mobile-safe-bottom">
       {/* Beautiful flowing wave background - Hidden on mobile for clean ChatGPT look */}
       <div className="absolute inset-0 hidden md:block">
         <svg className="absolute inset-0 w-full h-full" viewBox="0 0 1440 800" preserveAspectRatio="xMidYMid slice">
@@ -742,12 +808,28 @@ function VaultPageContent() {
                 <div>
                   <h3 className="text-sm font-medium text-gray-600 mb-3">Quick Actions</h3>
                   <div className="space-y-2">
-                    <Link href="/documents">
-                      <Button variant="ghost" className="w-full justify-start text-sm">
-                        <FileText className="w-4 h-4 mr-3" />
-                        Document Management
-                      </Button>
-                    </Link>
+                    {user?.is_admin && (
+                      <>
+                        <Link href="/documents">
+                          <Button variant="ghost" className="w-full justify-start text-sm">
+                            <FileText className="w-4 h-4 mr-3" />
+                            Document Management
+                          </Button>
+                        </Link>
+                        <Link href="/upload">
+                          <Button variant="ghost" className="w-full justify-start text-sm">
+                            <Upload className="w-4 h-4 mr-3" />
+                            Upload Documents
+                          </Button>
+                        </Link>
+                        <Link href="/admin">
+                          <Button variant="ghost" className="w-full justify-start text-sm">
+                            <Settings className="w-4 h-4 mr-3" />
+                            Admin Panel
+                          </Button>
+                        </Link>
+                      </>
+                    )}
                     <Button 
                       onClick={logout}
                       variant="ghost" 
@@ -1136,6 +1218,15 @@ function VaultPageContent() {
                                             variant="ghost"
                                             size="sm"
                                             className="w-full justify-start text-xs h-8"
+                                            onClick={(e) => shareCurationAsEmail(curation, e)}
+                                          >
+                                            <Mail className="w-3 h-3 mr-2" />
+                                            Send as Email
+                                          </Button>
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="w-full justify-start text-xs h-8"
                                             onClick={() => {
                                               // Share functionality
                                               navigator.clipboard.writeText(`AI Curation: ${curation.title}`)
@@ -1457,6 +1548,15 @@ function VaultPageContent() {
                                             variant="ghost"
                                             size="sm"
                                             className="w-full justify-start text-xs h-8"
+                                            onClick={(e) => shareSummaryAsEmail(summary, e)}
+                                          >
+                                            <Mail className="w-3 h-3 mr-2" />
+                                            Send as Email
+                                          </Button>
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="w-full justify-start text-xs h-8"
                                             onClick={() => {
                                               navigator.clipboard.writeText(`AI Summary: ${summary.name}`)
                                             }}
@@ -1586,28 +1686,28 @@ function VaultPageContent() {
               <div className="hidden md:flex justify-between items-center w-full">
                 {/* Center Section - Navigation Buttons */}
                 <div className="flex items-center space-x-3">
-                  <Link href="/documents">
-                    <Button 
-                      variant="outline"
-                      className="bg-slate-50 hover:bg-slate-100 text-slate-700 hover:text-slate-800 border-slate-200 hover:border-slate-300 font-medium px-2 py-1 h-6 text-xs rounded-md transition-all duration-200"
-                    >
-                      <FileText className="w-3 h-3 mr-1" />
-                      DOCUMENT MANAGEMENT
-                    </Button>
-                  </Link>
-
                   {user?.is_admin && (
-                    <Button 
-                      variant="outline"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        // Admin panel temporarily disabled
-                      }}
-                      className="bg-slate-50 hover:bg-slate-100 text-slate-700 hover:text-slate-800 border-slate-200 hover:border-slate-300 font-medium px-2 py-1 h-6 text-xs rounded-md transition-all duration-200 cursor-not-allowed"
-                    >
-                      <Settings className="w-3 h-3 mr-1" />
-                      ADMIN PANEL
-                    </Button>
+                    <>
+                      <Link href="/documents">
+                        <Button 
+                          variant="outline"
+                          className="bg-slate-50 hover:bg-slate-100 text-slate-700 hover:text-slate-800 border-slate-200 hover:border-slate-300 font-medium px-2 py-1 h-6 text-xs rounded-md transition-all duration-200"
+                        >
+                          <FileText className="w-3 h-3 mr-1" />
+                          DOCUMENT MANAGEMENT
+                        </Button>
+                      </Link>
+
+                      <Link href="/admin">
+                        <Button 
+                          variant="outline"
+                          className="bg-slate-50 hover:bg-slate-100 text-slate-700 hover:text-slate-800 border-slate-200 hover:border-slate-300 font-medium px-2 py-1 h-6 text-xs rounded-md transition-all duration-200"
+                        >
+                          <Settings className="w-3 h-3 mr-1" />
+                          ADMIN PANEL
+                        </Button>
+                      </Link>
+                    </>
                   )}
                 </div>
 
@@ -1794,14 +1894,15 @@ function VaultPageContent() {
               </div>
 
               <div>
-                <label className="text-xs font-medium text-slate-600 mb-1 block">Mode</label>
+                <label className="text-xs font-medium text-slate-600 mb-1 block">RAG Mode</label>
                 <Select value={keepContext} onValueChange={(value) => updateContextSettings(value, maxContext)}>
                   <SelectTrigger className="bg-white border-slate-200 rounded-lg h-8 text-xs hover:border-slate-300 transition-colors">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="NO">Hybrid Mode</SelectItem>
+                    <SelectItem value="NO">Hybrid RAG</SelectItem>
                     <SelectItem value="YES">Pure RAG</SelectItem>
+                    <SelectItem value="AGENTIC">Agentic RAG</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -2129,6 +2230,15 @@ function VaultPageContent() {
         </div>
       </div>
     </div>
+
+    {/* Email Share Modal */}
+    <EmailShareModal
+      isOpen={emailShare.isModalOpen}
+      onClose={emailShare.closeModal}
+      data={emailShare.currentData!}
+      onSend={emailShare.handleSendEmail}
+    />
+    </>
   )
 }
 

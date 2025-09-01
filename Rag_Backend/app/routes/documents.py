@@ -3,7 +3,7 @@ from sqlmodel import Session, select
 from typing import List
 from app.database import get_session
 from app.models import Document
-from app.deps import get_current_user
+from app.deps import get_current_user, get_current_user_with_tenant, get_current_admin_user, get_current_tenant_id_dependency
 from app.database import User
 from app.utils import qdrant_store
 from app.services.processing_service import ProcessingService, ProcessingStatus
@@ -19,31 +19,46 @@ async def get_user_documents(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ) -> List[dict]:
-    """Get all documents within the user's tenant"""
+    """Get documents accessible to the user within their tenant"""
     
-    # Query documents for the current user's tenant
-    # This allows users to see all documents uploaded by anyone in their tenant
-    statement = select(Document).where(Document.tenant_id == user.tenant_id)
-    documents = session.exec(statement).all()
+    # Use user's tenant_id directly from the user object
+    tenant_id = user.tenant_id
+    
+    # Use DocumentAccessService to get only documents the user can access
+    from app.services.document_access_service import DocumentAccessService
+    accessible_documents = DocumentAccessService.get_user_accessible_documents(
+        session, str(user.id), tenant_id
+    )
     
     result = []
-    for doc in documents:
+    for doc in accessible_documents:
         # Use the original filename from the document record instead of extracting from path
         # This preserves the original filename without UUID prefixes
         filename = doc.filename if hasattr(doc, 'filename') and doc.filename else os.path.basename(doc.path)
         
-        # Get file size if file exists
-        file_size = 0
-        if os.path.exists(doc.path):
-            file_size = os.path.getsize(doc.path)
+        # Use stored file size from database, fallback to file system check if needed
+        file_size = doc.file_size if hasattr(doc, 'file_size') and doc.file_size else 0
         
-        # Determine file type from extension using the original filename
-        file_ext = Path(filename).suffix.lower()
-        file_type = "application/pdf" if file_ext == ".pdf" else \
-                   "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if file_ext == ".docx" else \
-                   "text/plain" if file_ext == ".txt" else \
-                   "application/rtf" if file_ext == ".rtf" else \
-                   "application/octet-stream"
+        # If no stored file size, try to get it from file system (for backward compatibility)
+        if file_size == 0 and os.path.exists(doc.path):
+            try:
+                file_size = os.path.getsize(doc.path)
+                print(f"📊 Fallback file size calculation for {filename}: {file_size} bytes")
+            except Exception as e:
+                print(f"❌ Error getting file size for {doc.path}: {e}")
+                file_size = 0
+        
+        # Use stored content type or determine from extension
+        file_type = doc.content_type if hasattr(doc, 'content_type') and doc.content_type else None
+        
+        if not file_type:
+            # Fallback to extension-based detection
+            file_ext = Path(filename).suffix.lower()
+            file_type = "application/pdf" if file_ext == ".pdf" else \
+                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if file_ext == ".docx" else \
+                       "text/plain" if file_ext == ".txt" else \
+                       "application/rtf" if file_ext == ".rtf" else \
+                       "application/octet-stream"
         
         result.append({
             "id": doc.id,
@@ -71,7 +86,8 @@ async def get_user_documents(
 @router.delete("/documents/{document_id}")
 async def delete_document(
     document_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user_with_tenant),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Delete a document and all associated data (file, database record, RAG embeddings)
@@ -176,20 +192,24 @@ async def delete_document(
             }
         }
     
-    # Handle completed document (existing logic)
-    # Allow access to documents within the same tenant, but check ownership for deletion
+    # Handle completed document with proper tenant isolation
     statement = select(Document).where(
         Document.id == document_id,
-        Document.tenant_id == user.tenant_id
+        Document.tenant_id == tenant_id
     )
     document = session.exec(statement).first()
     
     if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail="Document not found in your tenant")
     
-    # For deletion, allow if user is admin or document owner
-    if not (user.is_admin or document.owner_id == str(user.id)):
-        raise HTTPException(status_code=403, detail="Permission denied. Only document owner or admin can delete documents.")
+    # Use DocumentAccessService to check if user can access this document
+    from app.services.document_access_service import DocumentAccessService
+    can_access = DocumentAccessService.can_user_access_document(
+        session, str(user.id), document_id, tenant_id, "manage"
+    )
+    
+    if not can_access:
+        raise HTTPException(status_code=403, detail="Permission denied. You don't have access to this document.")
     
     # Extract filename for vector store cleanup
     filename = os.path.basename(document.path)
@@ -210,6 +230,37 @@ async def delete_document(
             print(f"Deleted file: {document.path}")
         except Exception as e:
             print(f"Failed to delete file {document.path}: {e}")
+    
+    # Delete document access records first (to avoid foreign key constraint)
+    from app.models_document_access import DocumentAccess, DocumentAccessLog
+    
+    doc_access_records = session.exec(
+        select(DocumentAccess).where(DocumentAccess.document_id == document_id)
+    ).all()
+    for access in doc_access_records:
+        session.delete(access)
+    
+    # Delete document access logs
+    doc_access_logs = session.exec(
+        select(DocumentAccessLog).where(DocumentAccessLog.document_id == document_id)
+    ).all()
+    for log in doc_access_logs:
+        session.delete(log)
+    
+    # Delete document curation mappings
+    from app.models import DocumentCurationMapping, DocumentSummaryMapping
+    doc_curation_mappings = session.exec(
+        select(DocumentCurationMapping).where(DocumentCurationMapping.document_id == document_id)
+    ).all()
+    for mapping in doc_curation_mappings:
+        session.delete(mapping)
+    
+    # Delete document summary mappings
+    doc_summary_mappings = session.exec(
+        select(DocumentSummaryMapping).where(DocumentSummaryMapping.document_id == document_id)
+    ).all()
+    for mapping in doc_summary_mappings:
+        session.delete(mapping)
     
     # Delete from database (this removes all metadata, tags, summary, insights)
     session.delete(document)

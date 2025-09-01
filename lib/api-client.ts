@@ -161,11 +161,23 @@ export class RagApiClient {
   private maxFileSize: number
   private bulkUploadThreshold: number
   
-  // Cache for providers to prevent repeated API calls
+  // Enhanced caching for multiple data types
   private providersCache: ModelProvider[] | null = null
   private providersCacheTimestamp: number = 0
   private providersCachePromise: Promise<ModelProvider[]> | null = null
   private readonly PROVIDERS_CACHE_DURATION = 5 * 60 * 1000 // 5 minutes
+  
+  // Document cache for faster navigation
+  private documentsCache: BackendDocument[] | null = null
+  private documentsCacheTimestamp: number = 0
+  private documentsCachePromise: Promise<BackendDocument[]> | null = null
+  private readonly DOCUMENTS_CACHE_DURATION = 2 * 60 * 1000 // 2 minutes
+  
+  // Curations cache
+  private curationsCache: AICuration[] | null = null
+  private curationsCacheTimestamp: number = 0
+  private curationsCachePromise: Promise<AICuration[]> | null = null
+  private readonly CURATIONS_CACHE_DURATION = 3 * 60 * 1000 // 3 minutes
 
   constructor() {
     this.baseUrl = process.env.NEXT_PUBLIC_RAG_API_URL || 'https://sixth-vault.com/api'
@@ -176,19 +188,135 @@ export class RagApiClient {
   }
 
   private getAuthHeaders(): HeadersInit {
-    // Get token from cookie
-    const token = document.cookie.split('; ')
-      .find(row => row.startsWith('auth-token='))
-      ?.split('=')[1]
+    // Get token from cookie with enhanced error handling and debugging
+    let token: string | undefined
+    
+    try {
+      // Check if we're in a browser environment
+      if (typeof document === 'undefined') {
+        console.warn('🚨 API Client: Not in browser environment, no cookies available')
+        return {
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+          'ngrok-skip-browser-warning': 'true'
+        }
+      }
+
+      // Enhanced cookie parsing logic with multiple fallback strategies
+      const rawCookies = document.cookie
+      console.log('🔍 API Client: Raw cookies string:', rawCookies)
+      
+      if (!rawCookies || rawCookies.trim() === '') {
+        console.warn('🚨 API Client: No cookies found in document.cookie')
+        return {
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+          'ngrok-skip-browser-warning': 'true'
+        }
+      }
+
+      // Strategy 1: Standard cookie parsing
+      const cookies = rawCookies.split(';').map(cookie => cookie.trim())
+      let authCookie = cookies.find(cookie => cookie.startsWith('auth-token='))
+      
+      // Strategy 2: If not found, try without trimming (in case of edge cases)
+      if (!authCookie) {
+        const rawCookieArray = rawCookies.split(';')
+        authCookie = rawCookieArray.find(cookie => cookie.includes('auth-token='))
+      }
+      
+      // Strategy 3: Direct string search as last resort
+      if (!authCookie && rawCookies.includes('auth-token=')) {
+        const startIndex = rawCookies.indexOf('auth-token=')
+        const endIndex = rawCookies.indexOf(';', startIndex)
+        authCookie = endIndex === -1 
+          ? rawCookies.substring(startIndex)
+          : rawCookies.substring(startIndex, endIndex)
+      }
+      
+      console.log('🔍 API Client: Cookie parsing strategies:')
+      console.log('  - Total cookies found:', cookies.length)
+      console.log('  - Auth cookie found:', !!authCookie)
+      console.log('  - Auth cookie value:', authCookie)
+      
+      if (authCookie) {
+        // Extract token value after the '=' sign with enhanced validation
+        const equalIndex = authCookie.indexOf('=')
+        if (equalIndex !== -1 && equalIndex < authCookie.length - 1) {
+          const tokenValue = authCookie.substring(equalIndex + 1).trim()
+          
+          if (tokenValue && 
+              tokenValue !== 'undefined' && 
+              tokenValue !== 'null' && 
+              tokenValue !== '' &&
+              tokenValue.length > 10) {
+            
+            // Try to decode URI component in case the token was encoded
+            try {
+              const decodedToken = decodeURIComponent(tokenValue)
+              // Validate decoded token
+              if (decodedToken && 
+                  decodedToken !== 'undefined' && 
+                  decodedToken !== 'null' && 
+                  decodedToken.trim() !== '' &&
+                  decodedToken.length > 10) {
+                token = decodedToken
+                console.log('✅ API Client: Successfully decoded token')
+              } else {
+                token = tokenValue // Use raw token if decoded is invalid
+                console.log('🔧 API Client: Using raw token (decode validation failed)')
+              }
+            } catch (decodeError) {
+              console.warn('🔧 API Client: Token decode failed, using raw token:', decodeError)
+              token = tokenValue
+            }
+          } else {
+            console.warn('🚨 API Client: Invalid token value found:', {
+              exists: !!tokenValue,
+              notUndefined: tokenValue !== 'undefined',
+              notNull: tokenValue !== 'null',
+              notEmpty: tokenValue !== '',
+              lengthValid: tokenValue.length > 10,
+              actualLength: tokenValue.length
+            })
+          }
+        } else {
+          console.warn('🚨 API Client: Malformed auth cookie (no = found or empty value):', authCookie)
+        }
+      } else {
+        console.warn('🚨 API Client: No auth-token cookie found in:', rawCookies)
+      }
+      
+      console.log('🔍 API Client: Final token extraction result:')
+      console.log('  - Token extracted:', !!token)
+      console.log('  - Token length:', token?.length || 0)
+      console.log('  - Token preview:', token ? token.substring(0, 20) + '...' : 'none')
+      
+    } catch (error) {
+      console.error('🚨 API Client: Error reading auth token from cookies:', error)
+      console.log('🍪 API Client: Raw document.cookie:', document.cookie)
+    }
 
     const headers: HeadersInit = {
       'Cache-Control': 'no-cache', // Prevent caching of sensitive data
-      'Pragma': 'no-cache'
+      'Pragma': 'no-cache',
+      'ngrok-skip-browser-warning': 'true' // Skip ngrok browser warning
     }
 
     // Only add Authorization header if we have a valid token
-    if (token && token.trim()) {
+    if (token && token.trim() && token !== 'undefined' && token !== 'null' && token.length > 10) {
       headers['Authorization'] = `Bearer ${token}`
+      console.log('✅ API Client: Authorization header added successfully')
+      console.log('🔑 API Client: Using auth token:', token.substring(0, 20) + '...')
+    } else {
+      console.warn('🚨 API Client: No valid authentication token found - request will be sent without Authorization header')
+      console.log('🍪 API Client: Available cookies:', document.cookie)
+      console.log('🔍 API Client: Token validation failed:')
+      console.log('  - Token exists:', !!token)
+      console.log('  - Token trimmed:', !!token?.trim())
+      console.log('  - Not undefined string:', token !== 'undefined')
+      console.log('  - Not null string:', token !== 'null')
+      console.log('  - Length > 10:', (token?.length || 0) > 10)
     }
 
     return headers
@@ -201,7 +329,7 @@ export class RagApiClient {
     url: string, 
     options: RequestInit = {}
   ): Promise<Response> {
-    const maxRetries = 2
+    const maxRetries = 3 // Increased retries for vault page reliability
     let lastError: Error | null = null
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -214,61 +342,141 @@ export class RagApiClient {
         // Check if we have a token
         const hasToken = (authHeaders as Record<string, string>)['Authorization']
         if (!hasToken) {
-          throw new Error('No authentication token available - please log in again')
+          // ENHANCED: More graceful handling for missing tokens
+          console.warn('⚠️ API Client: No authentication token available')
+          
+          // For vault page, try to continue without token for some endpoints
+          if (url.includes('/health') || url.includes('/conversations')) {
+            console.log('🔄 API Client: Attempting request without token for public endpoint')
+            // Continue without auth headers
+          } else {
+            throw new Error('No authentication token available - please log in again')
+          }
+        } else {
+          console.log('🔑 API Client: Using token:', hasToken.substring(0, 20) + '...')
         }
-
-        console.log('🔑 API Client: Using token:', hasToken.substring(0, 20) + '...')
 
         const response = await fetch(url, {
           ...options,
           headers: {
             ...authHeaders,
             ...options.headers
-          }
+          },
+          // ENHANCED: Longer timeout for vault page loading
+          signal: AbortSignal.timeout(45000) // 45 second timeout for complex operations
         })
 
         console.log(`📊 API Client: Response status: ${response.status} (attempt ${attempt})`)
 
-        // If we get a 401, the token might be expired
+        // ENHANCED: Better 401 handling with retry logic
         if (response.status === 401) {
-          console.warn('🚨 API Client: Received 401 Unauthorized - token may be expired')
+          console.warn(`🚨 API Client: Received 401 Unauthorized on attempt ${attempt}`)
           
-          // On first 401, try to get a fresh token by triggering auth refresh
+          // On first 401, try to refresh token if possible
           if (attempt === 1) {
-            console.log('🔄 API Client: Attempting to refresh authentication...')
+            console.log('🔄 API Client: First 401 - attempting token refresh')
             
-            // Clear the potentially expired token
-            document.cookie = 'auth-token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'
+            // Try to get a fresh token using the same fixed parsing logic
+            let currentToken: string | undefined
+            try {
+              const cookies = document.cookie.split(';').map(cookie => cookie.trim())
+              const authCookie = cookies.find(cookie => cookie.startsWith('auth-token='))
+              
+              if (authCookie) {
+                const parts = authCookie.split('=')
+                if (parts.length >= 2) {
+                  const tokenValue = parts.slice(1).join('=')
+                  if (tokenValue && tokenValue !== 'undefined' && tokenValue !== 'null' && tokenValue.trim() !== '') {
+                    try {
+                      currentToken = decodeURIComponent(tokenValue)
+                      if (currentToken === 'undefined' || currentToken === 'null' || currentToken.trim() === '') {
+                        currentToken = undefined
+                      }
+                    } catch (decodeError) {
+                      currentToken = tokenValue
+                    }
+                  }
+                }
+              }
+            } catch (error) {
+              console.error('🚨 API Client: Error parsing token for retry:', error)
+            }
             
-            // Trigger a page refresh to re-authenticate
-            // This is the most reliable way to handle token expiration
-            throw new Error('Authentication expired - please refresh the page to log in again')
+            if (currentToken) {
+              console.log('🔄 API Client: Token still exists, retrying request')
+              // Continue to retry logic
+              if (attempt < maxRetries) {
+                await new Promise(resolve => setTimeout(resolve, 1000))
+                continue
+              }
+            }
+          }
+          
+          // After retries or no token, clear and redirect
+          console.warn('🚨 API Client: Final 401 - clearing token and redirecting')
+          document.cookie = 'auth-token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'
+          
+          // Don't redirect immediately for vault page - let it handle gracefully
+          if (url.includes('/vault') || url.includes('/documents') || url.includes('/curations')) {
+            console.log('⚠️ API Client: Vault page 401 - allowing graceful degradation')
+            return response // Return the 401 response for vault page to handle
+          }
+          
+          throw new Error('Authentication expired - redirecting to login')
+        }
+
+        // ENHANCED: Handle other error codes more gracefully
+        if (response.status >= 500) {
+          console.error(`🚨 API Client: Server error ${response.status} on attempt ${attempt}`)
+          if (attempt < maxRetries) {
+            // Retry server errors with exponential backoff
+            const delay = Math.pow(2, attempt) * 1000
+            console.log(`⏳ API Client: Retrying server error in ${delay}ms...`)
+            await new Promise(resolve => setTimeout(resolve, delay))
+            continue
           }
         }
 
-        // Return the response for successful calls or other error codes
+        // Return the response for successful calls or client errors (4xx except 401)
         return response
 
       } catch (error) {
         lastError = error as Error
         console.error(`❌ API Client: Attempt ${attempt} failed:`, error)
         
-        // Don't retry authentication errors or network errors
+        // ENHANCED: More intelligent retry logic
         if (error instanceof Error) {
+          // Don't retry these critical errors
           if (error.message.includes('Authentication expired') || 
-              error.message.includes('No authentication token') ||
-              error.message.includes('Failed to fetch') ||
-              error.message.includes('Network request failed')) {
+              error.message.includes('No authentication token')) {
             throw error
+          }
+          
+          // Retry network errors and timeouts
+          if (error.message.includes('Failed to fetch') ||
+              error.message.includes('Network request failed') ||
+              error.message.includes('timeout') ||
+              error.name === 'TimeoutError' ||
+              error.name === 'AbortError') {
+            
+            if (attempt < maxRetries) {
+              const delay = Math.pow(2, attempt) * 1000
+              console.log(`⏳ API Client: Retrying network error in ${delay}ms...`)
+              await new Promise(resolve => setTimeout(resolve, delay))
+              continue
+            }
           }
         }
         
-        // Wait before retrying (exponential backoff)
-        if (attempt < maxRetries) {
-          const delay = Math.pow(2, attempt) * 1000
-          console.log(`⏳ API Client: Waiting ${delay}ms before retry...`)
-          await new Promise(resolve => setTimeout(resolve, delay))
+        // If we've exhausted retries, throw the error
+        if (attempt >= maxRetries) {
+          throw error
         }
+        
+        // Wait before retrying other errors
+        const delay = Math.pow(2, attempt) * 1000
+        console.log(`⏳ API Client: Waiting ${delay}ms before retry...`)
+        await new Promise(resolve => setTimeout(resolve, delay))
       }
     }
 
@@ -387,10 +595,33 @@ export class RagApiClient {
    * Connect to WebSocket for progress updates with enhanced reliability
    */
   connectWebSocket(batchId: string): WebSocket {
-    // Get token from cookie
-    const token = document.cookie.split('; ')
-      .find(row => row.startsWith('auth-token='))
-      ?.split('=')[1]
+    // Get token from cookie using the same fixed parsing logic
+    let token: string | undefined
+    
+    try {
+      const cookies = document.cookie.split(';').map(cookie => cookie.trim())
+      const authCookie = cookies.find(cookie => cookie.startsWith('auth-token='))
+      
+      if (authCookie) {
+        const parts = authCookie.split('=')
+        if (parts.length >= 2) {
+          const tokenValue = parts.slice(1).join('=')
+          if (tokenValue && tokenValue !== 'undefined' && tokenValue !== 'null' && tokenValue.trim() !== '') {
+            try {
+              token = decodeURIComponent(tokenValue)
+              if (token === 'undefined' || token === 'null' || token.trim() === '') {
+                token = undefined
+              }
+            } catch (decodeError) {
+              console.warn('🔧 WebSocket: Token decode failed, using raw token:', decodeError)
+              token = tokenValue
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('🚨 WebSocket: Error reading auth token from cookies:', error)
+    }
 
     const wsUrl = `${this.baseUrl.replace('http', 'ws')}/ws/${batchId}${token ? `?token=${token}` : ''}`
     const ws = new WebSocket(wsUrl)
@@ -689,9 +920,50 @@ export class RagApiClient {
   }
 
   /**
-   * Get user documents from backend with enhanced retry logic for ngrok
+   * Handle authentication errors with automatic redirect
+   */
+  private handleAuthError(error: Error): void {
+    if (error.message.includes('Authentication failed') || 
+        error.message.includes('Authorization header missing') ||
+        error.message.includes('Invalid or expired token')) {
+      console.warn('🚨 API Client: Authentication error detected')
+      
+      // Clear any existing auth tokens
+      document.cookie = 'auth-token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'
+      
+      // Only redirect if we're not already on the login page and the error is actually a session expiration
+      if (typeof window !== 'undefined' && 
+          !window.location.pathname.includes('/login') &&
+          error.message.includes('expired')) {
+        console.warn('🚨 API Client: Session expired, redirecting to login')
+        // Use replace to avoid adding to browser history
+        window.location.replace('/login?reason=session_expired')
+      } else {
+        console.warn('🚨 API Client: Authentication error but not redirecting - may be initial load or other auth issue')
+      }
+    }
+  }
+
+  /**
+   * Get user documents from backend - FIXED: No caching to prevent sync issues
    */
   async getUserDocuments(): Promise<BackendDocument[]> {
+    console.log('🔄 API Client: Fetching fresh documents from backend (no cache)')
+    
+    try {
+      const result = await this.fetchDocumentsFromAPI()
+      console.log(`✅ API Client: Successfully fetched ${result.length} documents from backend`)
+      return result
+    } catch (error) {
+      console.error('❌ API Client: Failed to fetch documents:', error)
+      return []
+    }
+  }
+
+  /**
+   * Internal method to fetch documents from API
+   */
+  private async fetchDocumentsFromAPI(): Promise<BackendDocument[]> {
     const maxRetries = 3
     let lastError: Error | null = null
 
@@ -699,9 +971,19 @@ export class RagApiClient {
       try {
         console.log(`API Client: Fetching documents (attempt ${attempt}/${maxRetries}) from:`, `${this.baseUrl}/documents`)
         
+        // Check if we have a valid token before making the request
+        const authHeaders = this.getAuthHeaders()
+        const hasValidToken = (authHeaders as Record<string, string>)['Authorization']
+        
+        if (!hasValidToken) {
+          console.warn('API Client: No valid authentication token available for getUserDocuments')
+          // Return empty array instead of throwing error to allow graceful degradation
+          return []
+        }
+        
         const response = await fetch(`${this.baseUrl}/documents`, {
           headers: {
-            ...this.getAuthHeaders(),
+            ...authHeaders,
             'Content-Type': 'application/json',
             'Cache-Control': 'no-cache',
             'Pragma': 'no-cache'
@@ -712,7 +994,13 @@ export class RagApiClient {
 
         if (!response.ok) {
           if (response.status === 401) {
-            throw new Error('Authentication failed - please log in again')
+            console.warn('API Client: Received 401 Unauthorized for getUserDocuments')
+            // Clear the invalid token
+            if (typeof document !== 'undefined') {
+              document.cookie = 'auth-token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'
+            }
+            // Return empty array instead of throwing error to allow graceful degradation
+            return []
           }
           if (response.status === 404) {
             console.log('API Client: Documents endpoint not found, returning empty array')
@@ -769,9 +1057,10 @@ export class RagApiClient {
         lastError = error as Error
         console.error(`API Client: Attempt ${attempt} failed:`, error)
         
-        // Don't retry authentication errors
+        // For authentication errors, return empty array instead of throwing
         if (error instanceof Error && error.message.includes('Authentication failed')) {
-          throw error
+          console.warn('API Client: Authentication failed, returning empty documents array')
+          return []
         }
         
         if (attempt < maxRetries) {
@@ -783,7 +1072,9 @@ export class RagApiClient {
     }
 
     console.error('API Client: All retry attempts failed:', lastError)
-    throw lastError || new Error('Failed to fetch documents after multiple attempts')
+    // Return empty array instead of throwing error to allow graceful degradation
+    console.warn('API Client: Returning empty documents array due to persistent failures')
+    return []
   }
 
   /**
@@ -1113,7 +1404,9 @@ export class RagApiClient {
         console.error('📄 API Client: Error response body:', errorText)
         
         if (response.status === 401) {
-          throw new Error('Authentication failed - please log in again')
+          const authError = new Error('Authentication failed - please log in again')
+          this.handleAuthError(authError)
+          throw authError
         }
         if (response.status === 404) {
           console.log('📍 API Client: Curations endpoint not found, returning empty array')
@@ -2046,7 +2339,7 @@ export class RagApiClient {
   }
 
   /**
-   * Enhanced query method with conversation support
+   * Enhanced query method with conversation support and agentic RAG
    */
   async queryDocumentsWithConversation(
     question: string, 
@@ -2058,8 +2351,9 @@ export class RagApiClient {
       model?: string
       conversationId?: string
       saveConversation?: boolean
+      mode?: string // Add mode parameter for agentic RAG
     } = {}
-  ): Promise<QueryResponse & { conversation_id?: string }> {
+  ): Promise<QueryResponse & { conversation_id?: string; reasoning_summary?: any }> {
     const { 
       hybrid = this.hybrid, 
       maxContext = false, 
@@ -2067,12 +2361,21 @@ export class RagApiClient {
       provider = 'gemini', 
       model,
       conversationId,
-      saveConversation = true
+      saveConversation = true,
+      mode = 'standard'
     } = options
     
     const url = new URL(`${this.baseUrl}/query`)
     url.searchParams.set('hybrid', hybrid.toString())
     url.searchParams.set('max_context', maxContext.toString())
+
+    console.log('🎯 API Client: Enhanced query with agentic RAG support:', {
+      mode,
+      hybrid,
+      provider,
+      model,
+      maxContext
+    })
 
     try {
       const response = await fetch(url.toString(), {
@@ -2087,7 +2390,8 @@ export class RagApiClient {
           provider: provider,
           model: model,
           conversation_id: conversationId,
-          save_conversation: saveConversation
+          save_conversation: saveConversation,
+          mode: mode // Include mode in request body
         })
       })
 

@@ -88,6 +88,15 @@ class Settings(BaseSettings):
     # Email service
     resend_api_key: str | None = None
     email_domain: str = "sixth-vault.com"
+    frontend_url: str = "http://localhost:3000"  # Default to localhost for development
+    
+    # CORS Configuration
+    cors_origins: str = '["*"]'  # JSON string of allowed origins
+    cors_allow_credentials: bool = True
+    cors_allow_methods: str = '["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"]'
+    cors_allow_headers: str = '["Accept", "Accept-Language", "Content-Language", "Content-Type", "Authorization", "X-Requested-With", "X-CSRFToken", "X-Real-IP", "X-Forwarded-For", "X-Forwarded-Proto", "Cache-Control", "Pragma", "ngrok-skip-browser-warning", "User-Agent", "Referer", "Origin"]'
+    cors_expose_headers: str = '["Content-Length", "Content-Range", "Content-Type", "Authorization", "X-Total-Count", "X-Page-Count"]'
+    cors_max_age: int = 86400
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -7,6 +7,9 @@ import { aiSummaryService } from './ai-summary-service'
 import { documentStore, type DocumentData } from './document-store'
 import { cacheManager, CacheKeys } from './cache-manager'
 import { ragApiClient, type Conversation, type AICuration } from './api-client'
+import { userSessionManager } from './user-session-manager'
+import { vaultLoadingManager } from './vault-loading-manager'
+import { documentSyncManager, type DocumentSyncEvent } from './document-sync-manager'
 
 // ============================================================================
 // TYPES AND INTERFACES
@@ -936,14 +939,23 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
       // INSTANT PHASE: Load ALL cached data immediately for zero-delay UI
       console.log('⚡ VaultState: INSTANT PHASE - Loading all cached data for immediate UI response')
       
+      // Start document loading step
+      vaultLoadingManager.startDocumentLoading()
+      
       // 1. INSTANT DOCUMENTS LOADING
       const cachedDocuments = cacheManager.get<DocumentData[]>(CacheKeys.documents())
       if (cachedDocuments) {
         dispatch({ type: 'SET_DOCUMENTS', payload: cachedDocuments })
         generateDynamicCurationsAndSummaries(cachedDocuments)
         console.log('✅ VaultState: Documents loaded INSTANTLY:', cachedDocuments.length)
+        vaultLoadingManager.completeDocumentLoading(cachedDocuments.length)
+      } else {
+        vaultLoadingManager.completeDocumentLoading(0)
       }
 
+      // Start curation loading step
+      vaultLoadingManager.startCurationLoading()
+      
       // 2. INSTANT CURATIONS LOADING
       const cachedCurations = cacheManager.get<AICuration[]>(CacheKeys.curations())
       if (cachedCurations) {
@@ -959,15 +971,27 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
         }))
         dispatch({ type: 'SET_CUSTOM_CURATIONS', payload: customCurations })
         console.log('✅ VaultState: Curations loaded INSTANTLY:', filteredCachedCurations.length)
+        vaultLoadingManager.completeCurationLoading(filteredCachedCurations.length)
+      } else {
+        vaultLoadingManager.completeCurationLoading(0)
       }
 
+      // Start conversation loading step
+      vaultLoadingManager.startConversationLoading()
+      
       // 3. INSTANT CONVERSATIONS LOADING
       const cachedConversations = cacheManager.get<Conversation[]>('conversations_list')
       if (cachedConversations) {
         dispatch({ type: 'SET_CONVERSATIONS', payload: cachedConversations })
         console.log('✅ VaultState: Conversations loaded INSTANTLY:', cachedConversations.length)
+        vaultLoadingManager.completeConversationLoading(cachedConversations.length)
+      } else {
+        vaultLoadingManager.completeConversationLoading(0)
       }
 
+      // Start provider loading step
+      vaultLoadingManager.startProviderLoading()
+      
       // 4. AI PROVIDERS - NO CACHING (Always fresh from API as requested)
       console.log('🚫 VaultState: AI Providers NOT cached - will load fresh from API in background')
 
@@ -1003,10 +1027,14 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
               }
             })
             console.log('✅ VaultState: Provider settings restored INSTANTLY:', provider, '-', model)
+            vaultLoadingManager.completeProviderLoading(modelProviders.length)
           }
         } catch (error) {
           console.error('Error parsing cached provider settings:', error)
+          vaultLoadingManager.completeProviderLoading(0)
         }
+      } else {
+        vaultLoadingManager.completeProviderLoading(0)
       }
 
       // BACKGROUND PHASE: Start all background operations without blocking UI
@@ -1098,8 +1126,20 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
         })()
       ]).then(() => {
         console.log('✅ VaultState: All background operations + Documents Page prefetching completed')
+        
+        // Complete the finalization step
+        vaultLoadingManager.startFinalization()
+        setTimeout(() => {
+          vaultLoadingManager.completeFinalization()
+        }, 1000)
       }).catch(error => {
         console.error('❌ VaultState: Some background operations failed:', error)
+        
+        // Still complete finalization even if some operations failed
+        vaultLoadingManager.startFinalization()
+        setTimeout(() => {
+          vaultLoadingManager.completeFinalization()
+        }, 1000)
       })
 
       const initTime = Date.now() - startTime
@@ -1268,77 +1308,149 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
   }, [isAuthenticated, generateDynamicCurationsAndSummaries])
 
   // ============================================================================
-  // CROSS-TAB DOCUMENT SYNC FOR IMMEDIATE UPDATES
+  // ENHANCED DOCUMENT SYNC WITH DOCUMENT SYNC MANAGER
   // ============================================================================
 
-  // Listen for document updates from other tabs/windows (like the documents page)
+  // Setup document sync manager for real-time updates
   useEffect(() => {
     if (!isAuthenticated) return
 
-    const handleStorageChange = (event: StorageEvent) => {
-      // Listen for document upload events from other tabs
-      if (event.key === 'sixthvault_document_upload_event') {
+    console.log('📡 VaultState: Setting up enhanced document sync manager')
+    
+    // Register with document sync manager for immediate updates
+    const unsubscribeSync = documentSyncManager.addListener(
+      'vault-state-provider',
+      async (event: DocumentSyncEvent) => {
+        console.log(`📡 VaultState: Received sync event '${event.type}' from ${event.data.source}`)
+        
         try {
-          const eventData = JSON.parse(event.newValue || '{}')
-          console.log('📡 VaultState: Detected document upload from another tab:', eventData)
-          
-          // Immediately invalidate cache and refresh documents
-          cacheManager.delete(CacheKeys.documents())
-          cacheManager.delete(CacheKeys.documents() + '_meta')
-          
-          // Force refresh documents from document store with immediate UI update
-          documentStore.refreshDocuments().then(documents => {
-            console.log('✅ VaultState: Force refreshed documents from cross-tab event:', documents.length)
-            dispatch({ type: 'SET_DOCUMENTS', payload: documents })
-            generateDynamicCurationsAndSummaries(documents)
-            cacheManager.set(CacheKeys.documents(), documents, 5 * 60 * 1000)
-            cacheManager.set(CacheKeys.documents() + '_meta', { timestamp: Date.now() }, 5 * 60 * 1000)
-            
-            // Force a second update to ensure UI reflects changes
-            setTimeout(() => {
+          switch (event.type) {
+            case 'upload_completed':
+            case 'batch_completed':
+              console.log('🚀 VaultState: Processing upload/batch completion - immediate document refresh')
+              
+              // Immediately invalidate cache and refresh documents
+              cacheManager.delete(CacheKeys.documents())
+              cacheManager.delete(CacheKeys.documents() + '_meta')
+              
+              // Force refresh documents from document store with immediate UI update
+              const documents = await documentStore.refreshDocuments()
+              console.log('✅ VaultState: Documents refreshed immediately:', documents.length)
+              
               dispatch({ type: 'SET_DOCUMENTS', payload: documents })
-              console.log('🔄 VaultState: Secondary UI update to ensure document count sync')
-            }, 500)
-            
-          }).catch(error => {
-            console.error('❌ VaultState: Failed to refresh documents from cross-tab event:', error)
-          })
+              generateDynamicCurationsAndSummaries(documents)
+              
+              // Update cache with shorter TTL for faster updates
+              cacheManager.set(CacheKeys.documents(), documents, 5 * 60 * 1000)
+              cacheManager.set(CacheKeys.documents() + '_meta', { timestamp: Date.now() }, 5 * 60 * 1000)
+              
+              // Force a second update to ensure UI reflects changes immediately
+              setTimeout(() => {
+                dispatch({ type: 'SET_DOCUMENTS', payload: documents })
+                console.log('🔄 VaultState: Secondary UI update for immediate sync')
+              }, 100)
+              
+              console.log('🎉 VaultState: Document sync completed - vault dropdown updated immediately!')
+              break
+              
+            case 'document_deleted':
+              console.log('🗑️ VaultState: Processing document deletion - immediate refresh')
+              
+              // Clear cache and refresh
+              cacheManager.delete(CacheKeys.documents())
+              cacheManager.delete(CacheKeys.documents() + '_meta')
+              
+              const updatedDocuments = await documentStore.refreshDocuments()
+              dispatch({ type: 'SET_DOCUMENTS', payload: updatedDocuments })
+              generateDynamicCurationsAndSummaries(updatedDocuments)
+              
+              console.log('✅ VaultState: Document deletion synced immediately')
+              break
+              
+            case 'processing_update':
+              console.log('🔄 VaultState: Processing general update - cache invalidation')
+              
+              // Clear cache and reload
+              cacheManager.delete(CacheKeys.documents())
+              cacheManager.delete(CacheKeys.documents() + '_meta')
+              
+              const refreshedDocuments = await documentStore.refreshDocuments()
+              dispatch({ type: 'SET_DOCUMENTS', payload: refreshedDocuments })
+              generateDynamicCurationsAndSummaries(refreshedDocuments)
+              
+              // Force immediate UI update
+              setTimeout(() => {
+                dispatch({ type: 'SET_DOCUMENTS', payload: refreshedDocuments })
+                console.log('🔄 VaultState: Processing update synced to UI')
+              }, 100)
+              break
+              
+            default:
+              console.log(`📡 VaultState: Unhandled sync event type: ${event.type}`)
+              break
+          }
         } catch (error) {
-          console.error('❌ VaultState: Failed to parse cross-tab event data:', error)
+          console.error(`❌ VaultState: Error handling sync event '${event.type}':`, error)
+        }
+      },
+      'vault'
+    )
+
+    // Also keep the legacy storage listener for backward compatibility
+    const handleStorageChange = (event: StorageEvent) => {
+      // Legacy support for direct storage events
+      if (event.key === 'sixthvault_document_upload_event' && event.newValue) {
+        try {
+          const eventData = JSON.parse(event.newValue)
+          console.log('📡 VaultState: Legacy upload event detected:', eventData)
+          
+          // Trigger through sync manager for consistency
+          documentSyncManager.emitUploadCompleted(
+            eventData.documentId || 'unknown',
+            eventData.documentName || 'Unknown Document',
+            'documents_page'
+          )
+        } catch (error) {
+          console.error('❌ VaultState: Failed to parse legacy upload event:', error)
         }
       }
       
-      // Listen for cache invalidation events
+      if (event.key === 'sixthvault_document_delete_event' && event.newValue) {
+        try {
+          const eventData = JSON.parse(event.newValue)
+          console.log('📡 VaultState: Legacy delete event detected:', eventData)
+          
+          // Trigger through sync manager for consistency
+          documentSyncManager.emitDocumentDeleted(
+            eventData.documentId || 'unknown',
+            eventData.documentName || 'Unknown Document',
+            'documents_page'
+          )
+        } catch (error) {
+          console.error('❌ VaultState: Failed to parse legacy delete event:', error)
+        }
+      }
+      
       if (event.key === 'sixthvault_cache_invalidate_documents') {
-        console.log('🗑️ VaultState: Received cache invalidation signal, refreshing documents immediately')
+        console.log('📡 VaultState: Legacy cache invalidation detected')
         
-        // Clear cache and reload with force refresh
-        cacheManager.delete(CacheKeys.documents())
-        cacheManager.delete(CacheKeys.documents() + '_meta')
-        
-        // Force refresh documents from document store
-        documentStore.refreshDocuments().then(documents => {
-          console.log('✅ VaultState: Force refreshed documents from cache invalidation:', documents.length)
-          dispatch({ type: 'SET_DOCUMENTS', payload: documents })
-          generateDynamicCurationsAndSummaries(documents)
-          cacheManager.set(CacheKeys.documents(), documents, 5 * 60 * 1000)
-          cacheManager.set(CacheKeys.documents() + '_meta', { timestamp: Date.now() }, 5 * 60 * 1000)
-          
-          // Force a second update to ensure UI reflects changes
-          setTimeout(() => {
-            dispatch({ type: 'SET_DOCUMENTS', payload: documents })
-            console.log('🔄 VaultState: Secondary UI update from cache invalidation')
-          }, 500)
-          
-        }).catch(error => {
-          console.error('❌ VaultState: Failed to refresh documents from cache invalidation:', error)
+        // Trigger through sync manager
+        documentSyncManager.emit({
+          type: 'processing_update',
+          data: {
+            timestamp: Date.now(),
+            source: 'background'
+          }
         })
       }
     }
 
     window.addEventListener('storage', handleStorageChange)
     
+    // Cleanup function
     return () => {
+      console.log('🧹 VaultState: Cleaning up document sync listeners')
+      unsubscribeSync()
       window.removeEventListener('storage', handleStorageChange)
     }
   }, [isAuthenticated, generateDynamicCurationsAndSummaries])
@@ -1430,17 +1542,15 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
     try {
       dispatch({ type: 'SET_LOADING', payload: { section: 'documents', loading: true } })
       
-      const cached = cacheManager.get<DocumentData[]>(CacheKeys.documents())
-      if (cached) {
-        dispatch({ type: 'SET_DOCUMENTS', payload: cached })
-        generateDynamicCurationsAndSummaries(cached)
-        dispatch({ type: 'UPDATE_PERFORMANCE', payload: { cacheHits: state.performance.cacheHits + 1 } })
-      }
-
+      // FIXED: NO CACHING for documents - always load fresh from backend
+      console.log('🚫 VaultState: Loading documents WITHOUT caching - always fresh from backend')
+      
       const documents = await documentStore.getDocuments()
       dispatch({ type: 'SET_DOCUMENTS', payload: documents })
       generateDynamicCurationsAndSummaries(documents)
-      cacheManager.set(CacheKeys.documents(), documents, 30 * 60 * 1000)
+      
+      // FIXED: NO CACHING - documents are always loaded fresh
+      console.log('✅ VaultState: Documents loaded fresh from backend:', documents.length)
 
     } catch (error) {
       console.error('Failed to load documents:', error)
@@ -1451,15 +1561,15 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
   }, [state.performance, generateDynamicCurationsAndSummaries])
 
   const refreshDocuments = useCallback(async () => {
-    console.log('🔄 VaultState: Manual document refresh triggered')
+    console.log('🔄 VaultState: Manual document refresh triggered - NO CACHING')
     
-    // Clear cache first to force fresh data
-    dispatch({ type: 'REFRESH_DOCUMENTS' })
+    // FIXED: NO CACHE CLEARING needed since we don't cache documents
+    console.log('🚫 VaultState: Skipping cache clearing - documents are never cached')
     
-    // Then reload documents
+    // Load documents fresh from backend
     await loadDocuments()
     
-    console.log('✅ VaultState: Document refresh completed')
+    console.log('✅ VaultState: Document refresh completed - fresh from backend')
   }, [loadDocuments])
 
   // ============================================================================
@@ -2065,6 +2175,23 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
       }
       dispatch({ type: 'ADD_CHAT_MESSAGE', payload: aiMessage })
 
+      // Determine RAG mode based on keepContext setting
+      let ragMode = "standard"
+      let hybrid = false
+      
+      if (state.settings.keepContext === "AGENTIC") {
+        ragMode = "agentic"
+        hybrid = false // Agentic mode uses its own logic
+      } else if (state.settings.keepContext === "NO") {
+        ragMode = "hybrid"
+        hybrid = true
+      } else {
+        ragMode = "standard"
+        hybrid = false
+      }
+
+      console.log('🎯 VaultState: Sending message with RAG mode:', ragMode, 'hybrid:', hybrid)
+
       // Send to backend using queryDocumentsWithConversation
       const response = await ragApiClient.queryDocumentsWithConversation(message, {
         provider: state.settings.selectedProvider,
@@ -2072,7 +2199,9 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
         maxContext: state.settings.maxContext === 'YES',
         documentIds: state.documents.selectedFiles,
         conversationId: state.conversations.currentConversationId || undefined,
-        saveConversation: true
+        saveConversation: true,
+        hybrid: hybrid,
+        mode: ragMode
       })
 
       // Update AI message with response
@@ -2250,28 +2379,64 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
   // EFFECTS
   // ============================================================================
 
-  // Handle authentication state changes
+  // Handle authentication state changes with user session isolation
   useEffect(() => {
     const wasAuthenticated = lastAuthStateRef.current
     const isNowAuthenticated = isAuthenticated
 
-    // If user just logged out, reset initialization
+    // If user just logged out, reset initialization with complete session cleanup
     if (wasAuthenticated && !isNowAuthenticated) {
-      console.log('🔄 VaultState: User logged out, resetting state')
+      console.log('🔄 VaultState: User logged out, resetting state with session isolation')
       initializationRef.current = false
+      
+      // Clear user-specific cache before resetting state
+      const currentSession = userSessionManager.getCurrentSession()
+      if (currentSession) {
+        console.log('🧹 VaultState: Clearing user-specific cache for:', currentSession.email)
+        cacheManager.clearUserCache(currentSession.userId)
+      }
+      
+      // Clear session and reset state
+      userSessionManager.clearCurrentSession()
       dispatch({ type: 'RESET_STATE' })
     }
 
-    // If user just logged in, initialize vault
-    if (!wasAuthenticated && isNowAuthenticated && !authLoading) {
-      console.log('🔄 VaultState: User logged in, initializing vault')
+    // If user just logged in, initialize vault with new session
+    if (!wasAuthenticated && isNowAuthenticated && !authLoading && user) {
+      console.log('🔄 VaultState: User logged in, initializing vault with session isolation for:', user.email)
       initializationRef.current = false
+      
+      // Initialize new user session, preserving auth token
+      userSessionManager.initializeSession(user.id.toString(), user.email, true)
+      
+      // Initialize vault
       initializeVault()
+    }
+
+    // Handle user switching in same tab (different user ID)
+    if (wasAuthenticated && isNowAuthenticated && user) {
+      const currentSession = userSessionManager.getCurrentSession()
+      if (currentSession && currentSession.userId !== user.id.toString()) {
+        console.log('🔄 VaultState: Different user detected, switching session isolation')
+        console.log('   - Previous user:', currentSession.email)
+        console.log('   - New user:', user.email)
+        
+        // Clear previous user's cache
+        cacheManager.clearUserCache(currentSession.userId)
+        
+        // Switch to new user session
+        userSessionManager.switchUser(user.id.toString(), user.email)
+        
+        // Reset and reinitialize vault for new user
+        initializationRef.current = false
+        dispatch({ type: 'RESET_STATE' })
+        initializeVault()
+      }
     }
 
     // Update the last auth state
     lastAuthStateRef.current = isAuthenticated
-  }, [isAuthenticated, authLoading, initializeVault])
+  }, [isAuthenticated, authLoading, user, initializeVault])
 
   // Initialize vault on mount
   useEffect(() => {

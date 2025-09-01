@@ -4,7 +4,7 @@ const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:800
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const authHeader = request.headers.get('authorization')
@@ -12,8 +12,10 @@ export async function DELETE(
       return NextResponse.json({ error: 'Authorization header required' }, { status: 401 })
     }
 
+    const { id } = await params
+
     // Forward request to FastAPI backend
-    const response = await fetch(`${BACKEND_URL}/admin/users/${params.id}`, {
+    const response = await fetch(`${BACKEND_URL}/admin/users/${id}`, {
       method: 'DELETE',
       headers: {
         'Authorization': authHeader,
@@ -36,7 +38,7 @@ export async function DELETE(
 
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const authHeader = request.headers.get('authorization')
@@ -45,9 +47,10 @@ export async function PUT(
     }
 
     const userData = await request.json()
+    const { id } = await params
 
     // Forward request to FastAPI backend
-    const response = await fetch(`${BACKEND_URL}/admin/users/${params.id}`, {
+    const response = await fetch(`${BACKEND_URL}/admin/users/${id}`, {
       method: 'PUT',
       headers: {
         'Authorization': authHeader,

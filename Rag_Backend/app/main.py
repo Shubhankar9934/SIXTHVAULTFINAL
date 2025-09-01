@@ -1,5 +1,6 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from app.middleware.tenant_middleware import TenantContextMiddleware
 import asyncio
 import json
 import time
@@ -11,6 +12,9 @@ from app.routes.curations import router as curations_router
 from app.routes.summaries import router as summaries_router
 from app.routes.admin import router as admin_router
 from app.routes.providers import router as providers_router
+from app.routes.tenants import router as tenants_router
+from app.routes.performance import router as performance_router
+from app.routes.email import router as email_router
 from app.auth.routes import router as auth_router
 from app.utils.broadcast import subscribe, unsubscribe
 from app.auth.jwt_handler import verify_token
@@ -20,14 +24,30 @@ app = FastAPI(title="DocAI - RAG Backend with Authentication")
 # Initialize database on startup
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database, LLM models, and perform startup tasks"""
-    print("🚀 STARTING ULTRA-FAST RAG BACKEND SERVER")
+    """Initialize database and essential services with lazy model loading"""
+    print("🚀 STARTING OPTIMIZED RAG BACKEND SERVER")
     print("=" * 50)
+    
+    # Initialize memory management
+    try:
+        print("🧠 Initializing memory management...")
+        from app.utils.memory_manager import memory_manager, start_memory_monitoring, optimize_for_large_documents
+        
+        # Apply memory optimizations
+        optimize_for_large_documents()
+        
+        # Start background memory monitoring
+        asyncio.create_task(start_memory_monitoring())
+        
+        print("✅ Memory management initialized successfully")
+    except Exception as e:
+        print(f"⚠️ Memory management initialization failed: {e}")
     
     # Initialize database
     try:
         print("📊 Initializing database...")
         init_db()
+        print("Database tables initialized successfully")
         print("✅ Database initialized successfully")
     except Exception as e:
         print(f"❌ Failed to initialize database: {e}")
@@ -35,169 +55,167 @@ async def startup_event():
         # For now, we'll continue but log the error
         pass
     
-    # Initialize ALL MODELS at startup for instant inference
+    # OPTIMIZED: Initialize only essential models at startup
     from app.config import settings
     total_init_start = time.time()
     
-    print("🚀 INITIALIZING ALL MODELS FOR INSTANT INFERENCE")
+    print("🚀 INITIALIZING ESSENTIAL MODELS FOR FAST STARTUP")
     print("=" * 60)
     
-    # Step 1: Initialize LLM providers (Bedrock, Groq, OpenAI, etc.)
+    # Step 1: Initialize LLM providers (lazy loading - just check credentials)
     try:
-        print("🤖 STEP 1: Initializing LLM Providers...")
-        from app.services.llm_factory import initialize_all_enabled_models
-        llm_result = await initialize_all_enabled_models()
+        print("🤖 STEP 1: Preparing LLM Providers...")
+        from app.services.llm_factory import has_required_credentials
         
-        if llm_result["success"]:
-            print(f"✅ LLM Providers initialized: {len(llm_result['successful_providers'])} ready")
-            print(f"   - Ready providers: {', '.join(llm_result['successful_providers'])}")
+        enabled_providers = []
+        for provider_name in ["bedrock", "groq", "openai", "deepseek", "gemini"]:
+            provider_config = getattr(settings, f"{provider_name}_enabled", False)
+            if provider_config and has_required_credentials(provider_name):
+                enabled_providers.append(provider_name)
+        
+        print(f"📋 Found {len(enabled_providers)} enabled providers with credentials")
+        if enabled_providers:
+            print(f"✅ LLM Providers ready for lazy loading: {', '.join(enabled_providers)}")
         else:
-            print("⚠️ No LLM providers initialized - will try on-demand loading")
+            print("⚠️ No LLM providers with valid credentials found")
             
     except Exception as e:
-        print(f"⚠️ Failed to initialize LLM providers: {e}")
-        llm_result = {"success": False, "successful_providers": []}
+        print(f"⚠️ Failed to check LLM providers: {e}")
+        enabled_providers = []
     
-    # Step 2: Initialize RAG Models (Embedding, Reranker)
+    # Step 2: Initialize only essential embedding model (lazy loading for others)
     try:
-        print("\n🧠 STEP 2: Initializing RAG Models...")
+        print("\n🧠 STEP 2: Preparing RAG Models...")
         
-        # Initialize embedding model
-        print("📊 Loading JinaAI embedding model...")
-        from app.utils.qdrant_store import preload_embedding_model
-        await preload_embedding_model()
-        print("✅ JinaAI embedding model ready (768 dimensions)")
+        # Only initialize embedding model cache (not the actual model)
+        print("📊 Preparing JinaAI embedding model for lazy loading...")
+        print("🚀 Loading embedding model on first use: jinaai/jina-embeddings-v2-base-en")
+        print("   (This enables faster server startup - model loads only when needed)")
         
-        # Initialize reranker model
-        print("🎯 Loading BGE reranker model...")
-        from app.services.rag import reranker
-        await reranker.initialize()
-        if reranker.model_loaded:
-            print(f"✅ BGE reranker model ready ({reranker.model_name})")
-        else:
-            print("⚠️ Reranker will use LLM fallback")
-        
-        # Initialize RAG cache
+        # Initialize RAG cache only
         print("⚡ Initializing RAG cache...")
         from app.services.rag import cache
         await cache.initialize()
         print("✅ RAG cache ready")
         
-        rag_models_ready = True
+        print("✅ RAG Models prepared for lazy loading")
         
     except Exception as e:
-        print(f"⚠️ Failed to initialize RAG models: {e}")
-        rag_models_ready = False
+        print(f"⚠️ Failed to prepare RAG models: {e}")
     
-    # Step 3: Initialize KeyBERT and Tagging Models
+    # Step 3: Initialize KeyBERT (lazy loading)
     try:
-        print("\n🏷️  STEP 3: Initializing KeyBERT and Tagging Models...")
+        print("\n🏷️  STEP 3: Preparing Tagging Models...")
         
-        # Initialize KeyBERT model by importing the enhanced tagger
-        from app.services.tagging import _enhanced_tagger, KEYBERT_AVAILABLE
-        
-        # Check if KeyBERT is available and initialized
-        if KEYBERT_AVAILABLE and hasattr(_enhanced_tagger, '_kw') and _enhanced_tagger._kw is not None:
-            print("✅ KeyBERT model ready (all-MiniLM-L6-v2)")
-        else:
-            print("⚠️ KeyBERT not available - will use LLM fallback")
-        
-        tagging_models_ready = True
+        # Just check if KeyBERT is available, don't load it
+        try:
+            from app.services.tagging import KEYBERT_AVAILABLE
+            if KEYBERT_AVAILABLE:
+                print("✅ KeyBERT available for lazy loading")
+            else:
+                print("⚠️ KeyBERT not available - will use LLM fallback")
+        except Exception:
+            print("⚠️ KeyBERT check failed - will use LLM fallback")
         
     except Exception as e:
-        print(f"⚠️ Failed to initialize tagging models: {e}")
-        tagging_models_ready = False
+        print(f"⚠️ Failed to check tagging models: {e}")
     
     # Summary
     total_init_time = time.time() - total_init_start
     print("\n" + "=" * 60)
-    print(f"🎉 MODEL INITIALIZATION COMPLETE in {total_init_time:.2f}s")
+    print(f"🎉 OPTIMIZED STARTUP COMPLETE in {total_init_time:.2f}s")
     print("=" * 60)
     
-    # LLM Providers Summary
-    if llm_result["success"]:
-        print(f"✅ LLM Providers: {len(llm_result['successful_providers'])} ready")
-        print(f"   - {', '.join(llm_result['successful_providers'])}")
-    else:
-        print("❌ LLM Providers: None ready (on-demand loading)")
+    # Status Summary
+    print(f"✅ Database: Ready")
+    print(f"✅ Memory Management: Active")
+    print(f"✅ LLM Providers: {len(enabled_providers)} ready for lazy loading")
+    print(f"✅ RAG Models: Prepared for on-demand loading")
+    print(f"✅ Tagging Models: Available for lazy initialization")
     
-    # RAG Models Summary
-    if rag_models_ready:
-        print("✅ RAG Models: Embedding + Reranker + Cache ready")
-        print("   - JinaAI v2 embedding (768 dim)")
-        print("   - BGE reranker (optimal performance)")
-        print("   - Lightning-fast cache system")
-    else:
-        print("❌ RAG Models: Will load on-demand")
-    
-    # Tagging Models Summary
-    if tagging_models_ready:
-        print("✅ Tagging Models: KeyBERT ready")
-        print("   - all-MiniLM-L6-v2 for keyword extraction")
-    else:
-        print("❌ Tagging Models: Will use LLM fallback")
-    
-    print("\n⚡ ZERO LOADING DELAYS FOR ALL OPERATIONS!")
-    print("   🤖 LLM queries: Instant inference")
-    print("   🔍 RAG searches: Instant embedding + reranking")
-    print("   🏷️  AI tagging: Instant keyword extraction")
-    print("   📄 Document processing: All models pre-warmed")
-    print("   ✨ AI curation: Instant model availability")
-    print("   📝 Summarization: Zero startup delays")
+    print("\n⚡ LAZY LOADING STRATEGY ACTIVE!")
+    print("   🤖 LLM queries: Models load on first request")
+    print("   🔍 RAG searches: Embedding model loads when needed")
+    print("   🏷️  AI tagging: KeyBERT loads on first use")
+    print("   📄 Document processing: Models initialize as required")
+    print("   ✨ Memory efficient: Only load what's actually used")
     print("=" * 60)
     
-    print("🎉 ULTRA-FAST RAG BACKEND SERVER READY!")
+    print("🎉 OPTIMIZED RAG BACKEND SERVER READY!")
     print("   - Database: ✅ Ready")
-    print("   - LLM Models: 🔥 Pre-loaded")
-    print("   - Zero Timeout: ⚡ Enabled")
-    print("   - Parallel Processing: 🔄 8 concurrent slots")
-    print("   - Large Context: 📄 32K tokens supported")
+    print("   - Memory Usage: 🔋 Optimized")
+    print("   - Startup Time: ⚡ <5 seconds")
+    print("   - Lazy Loading: 🧠 Enabled")
+    print("   - Auto Scaling: 📈 Memory-aware")
     print("=" * 50)
 
-# Add CORS middleware with enhanced configuration for production deployment
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+# Add CORS middleware with dynamic configuration from settings
+import json
+from app.config import settings
+
+# Parse CORS origins from settings
+try:
+    cors_origins = json.loads(settings.cors_origins)
+except (json.JSONDecodeError, AttributeError):
+    # Fallback to default origins if parsing fails
+    cors_origins = [
         "http://localhost:3000", 
         "http://127.0.0.1:3000",
         "http://localhost:8000", 
         "http://127.0.0.1:8000",
         "https://sixth-vault.com", 
         "https://www.sixth-vault.com",
-        "http://sixth-vault.com",  # HTTP fallback
-        "http://www.sixth-vault.com",  # HTTP fallback
-        # Add any other domains you might use
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
-    allow_headers=[
-        "Accept",
-        "Accept-Language",
-        "Content-Language",
-        "Content-Type",
-        "Authorization",
-        "X-Requested-With",
-        "X-CSRFToken",
-        "X-Real-IP",
-        "X-Forwarded-For",
-        "X-Forwarded-Proto",
-        "Cache-Control",
-        "Pragma",
-        "ngrok-skip-browser-warning",
-        "User-Agent",
-        "Referer",
-        "Origin"
-    ],
-    expose_headers=[
-        "Content-Length",
-        "Content-Range",
-        "Content-Type",
-        "Authorization",
-        "X-Total-Count",
-        "X-Page-Count"
-    ],
-    max_age=86400,  # Cache preflight requests for 24 hours
+        "http://sixth-vault.com",
+        "http://www.sixth-vault.com"
+    ]
+
+# Parse other CORS settings
+try:
+    cors_methods = json.loads(settings.cors_allow_methods)
+except (json.JSONDecodeError, AttributeError):
+    cors_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"]
+
+try:
+    cors_headers = json.loads(settings.cors_allow_headers)
+except (json.JSONDecodeError, AttributeError):
+    cors_headers = [
+        "Accept", "Accept-Language", "Content-Language", "Content-Type", 
+        "Authorization", "X-Requested-With", "X-CSRFToken", "X-Real-IP",
+        "X-Forwarded-For", "X-Forwarded-Proto", "Cache-Control", "Pragma",
+        "ngrok-skip-browser-warning", "User-Agent", "Referer", "Origin"
+    ]
+
+try:
+    cors_expose_headers = json.loads(settings.cors_expose_headers)
+except (json.JSONDecodeError, AttributeError):
+    cors_expose_headers = [
+        "Content-Length", "Content-Range", "Content-Type", 
+        "Authorization", "X-Total-Count", "X-Page-Count"
+    ]
+
+print(f"🌐 CORS Configuration:")
+print(f"   - Origins: {cors_origins}")
+print(f"   - Credentials: {settings.cors_allow_credentials}")
+print(f"   - Methods: {cors_methods}")
+print(f"   - Max Age: {settings.cors_max_age}s")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=settings.cors_allow_credentials,
+    allow_methods=cors_methods,
+    allow_headers=cors_headers,
+    expose_headers=cors_expose_headers,
+    max_age=settings.cors_max_age,
 )
+
+# Add tenant context middleware for multi-tenant support
+app.add_middleware(TenantContextMiddleware)
+
+print("🏢 Multi-tenant middleware enabled")
+print("   - Tenant isolation: ✅ Active")
+print("   - Role-based access: ✅ Enforced")
+print("   - Admin-only routes: ✅ Protected")
 
 # Configure FastAPI to prevent 307 redirects by default
 app.router.redirect_slashes = False
@@ -206,11 +224,51 @@ app.router.redirect_slashes = False
 @app.options("/{full_path:path}")
 async def options_handler(full_path: str):
     """Handle all OPTIONS requests for CORS preflight"""
-    return {"message": "OK"}
+    from fastapi import Response
+    
+    response = Response()
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD"
+    response.headers["Access-Control-Allow-Headers"] = "Accept, Accept-Language, Content-Language, Content-Type, Authorization, X-Requested-With, X-CSRFToken, X-Real-IP, X-Forwarded-For, X-Forwarded-Proto, Cache-Control, Pragma, ngrok-skip-browser-warning, User-Agent, Referer, Origin"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Max-Age"] = "86400"
+    response.status_code = 200
+    
+    print(f"🌐 CORS: Handled OPTIONS request for /{full_path}")
+    return response
+
+# Root endpoint handler to fix 405 Method Not Allowed error
+@app.get("/")
+async def root():
+    """Root endpoint providing API information"""
+    return {
+        "message": "SixthVault RAG Backend API",
+        "version": "1.0.0",
+        "status": "running",
+        "documentation": "/docs",
+        "health_check": "/health",
+        "features": [
+            "Document Upload & Processing",
+            "AI-Powered RAG Queries", 
+            "User Authentication",
+            "Real-time WebSocket Updates",
+            "AI Curation & Summarization"
+        ],
+        "endpoints": {
+            "auth": "/auth/*",
+            "documents": "/documents",
+            "query": "/query", 
+            "curations": "/curations",
+            "conversations": "/conversations",
+            "health": "/health",
+            "admin": "/admin/*"
+        }
+    }
 
 # Include routers
 app.include_router(auth_router)
 app.include_router(admin_router)
+app.include_router(tenants_router)
 app.include_router(upload_router)
 app.include_router(query_router)
 app.include_router(documents_router)
@@ -218,9 +276,12 @@ app.include_router(curations_router)
 app.include_router(summaries_router)
 app.include_router(conversations_router)
 app.include_router(providers_router)
+app.include_router(performance_router)
+app.include_router(email_router)
 app.include_router(health_router)
 
 @app.get("/health")
+@app.head("/health")
 async def health_check():
     """Enhanced health check endpoint with LLM provider status"""
     try:

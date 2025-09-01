@@ -35,14 +35,6 @@ class TempUser(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = None
 
-class Tenant(SQLModel, table=True):
-    __tablename__ = "tenants"
-    
-    id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    name: str  # Company/Organization name
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    is_active: bool = True
-    owner_id: Optional[str] = None  # The user who owns this tenant
 
 class UserBase(SQLModel):
     email: str
@@ -51,13 +43,20 @@ class UserBase(SQLModel):
     last_name: str
     company: Optional[str] = None
     company_id: Optional[str] = None
-    tenant_id: Optional[str] = None  # Add tenant isolation
     verified: bool = False
     role: str = "user"
     is_admin: bool = False
+    is_super_admin: bool = False  # New: Super admin for cross-tenant management
     is_active: bool = True
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
     last_login: Optional[datetime] = None
+    
+    # Multi-tenant fields
+    tenant_id: Optional[str] = Field(foreign_key="tenants.id")  # User's current tenant context
+    primary_tenant_id: Optional[str] = Field(foreign_key="tenants.id")  # User's primary tenant
+    subscription_tier: str = Field(default="free")  # For public tenant users
+    storage_used_mb: int = Field(default=0)
+    storage_limit_mb: int = Field(default=100)
 
 class User(UserBase, table=True):
     __tablename__ = "users"
@@ -67,7 +66,6 @@ class User(UserBase, table=True):
     reset_token_expires_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     created_by: Optional[str] = None  # Track who created this user (for admin-created users)
-    tenant_id: Optional[str] = Field(foreign_key="tenants.id")  # Link to tenant
 
 class UserToken(SQLModel, table=True):
     __tablename__ = "user_tokens"
@@ -97,6 +95,13 @@ def init_db():
             SummarySettings, DocumentSummaryMapping, SummaryGenerationHistory,
             Conversation, Message, ConversationSettings
         )
+        from app.models_document_access import (
+            DocumentAccess, UserDocumentGroup, DocumentAccessLog
+        )
+        from app.tenant_models import (
+            Tenant, TenantUser, TenantInvitation, TenantSettings,
+            TenantAnalytics, TenantAuditLog
+        )
         
         # Create tables only if they don't exist (PostgreSQL handles IF NOT EXISTS automatically)
         SQLModel.metadata.create_all(engine)
@@ -104,6 +109,9 @@ def init_db():
     except Exception as e:
         print(f"Error during database initialization: {e}")
         raise
+
+# Import Tenant model for use in other modules
+from app.tenant_models import Tenant
 
 def reset_database():
     """Reset database by dropping and recreating all tables - USE WITH CAUTION"""
@@ -115,10 +123,29 @@ def reset_database():
             SummarySettings, DocumentSummaryMapping, SummaryGenerationHistory,
             Conversation, Message, ConversationSettings
         )
+        from app.models_document_access import (
+            DocumentAccess, UserDocumentGroup, DocumentAccessLog
+        )
+        from app.tenant_models import (
+            Tenant, TenantUser, TenantInvitation, TenantSettings,
+            TenantAnalytics, TenantAuditLog
+        )
         
         # Drop all tables with CASCADE to handle foreign key constraints
         with engine.begin() as conn:
-            # Drop all tables in reverse dependency order
+            # Drop document access tables first
+            conn.execute(text("DROP TABLE IF EXISTS document_access_logs CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS user_document_groups CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS document_access CASCADE"))
+            
+            # Drop tenant-related tables
+            conn.execute(text("DROP TABLE IF EXISTS tenant_audit_logs CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS tenant_analytics CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS tenant_settings CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS tenant_invitations CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS tenant_users CASCADE"))
+            
+            # Drop existing tables in reverse dependency order
             conn.execute(text("DROP TABLE IF EXISTS conversation_settings CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS messages CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS conversations CASCADE"))
@@ -132,7 +159,7 @@ def reset_database():
             conn.execute(text("DROP TABLE IF EXISTS ai_curations CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS processing_documents CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS user_tokens CASCADE"))
-            conn.execute(text("DROP TABLE IF EXISTS document CASCADE"))
+            conn.execute(text("DROP TABLE IF EXISTS documents CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS users CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS temp_users CASCADE"))
             conn.execute(text("DROP TABLE IF EXISTS tenants CASCADE"))

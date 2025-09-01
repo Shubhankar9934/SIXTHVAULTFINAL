@@ -2,6 +2,7 @@
  * Focused Cache Manager - Caching ONLY for AI Curation and Chat History
  * Implements optimized caching specifically for these two features only
  * Documents upload/delete and other functionalities are excluded from caching
+ * Now supports user-specific cache isolation to prevent data leakage between accounts
  */
 
 export interface CacheEntry<T> {
@@ -10,6 +11,7 @@ export interface CacheEntry<T> {
   ttl: number // Time to live in milliseconds
   key: string
   version: string
+  userId?: string // User-specific cache isolation
 }
 
 export interface CacheStats {
@@ -40,9 +42,12 @@ class CacheManager {
   private readonly CONVERSATION_TTL = 12 * 60 * 60 * 1000 // 12 hours for conversations
 
   private constructor() {
-    this.loadFromStorage()
-    this.startCleanupInterval()
-    this.setupStorageSync()
+    // Only initialize storage-related features in browser environment
+    if (typeof window !== 'undefined') {
+      this.loadFromStorage()
+      this.startCleanupInterval()
+      this.setupStorageSync()
+    }
   }
 
   static getInstance(): CacheManager {
@@ -232,6 +237,9 @@ class CacheManager {
    * Load cache from localStorage
    */
   private loadFromStorage(): void {
+    // Only run in browser environment
+    if (typeof window === 'undefined') return
+    
     try {
       const stored = localStorage.getItem(this.STORAGE_KEY)
       if (!stored) return
@@ -250,7 +258,9 @@ class CacheManager {
     } catch (error) {
       console.error('Cache: Failed to load from storage:', error)
       // Clear corrupted storage
-      localStorage.removeItem(this.STORAGE_KEY)
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem(this.STORAGE_KEY)
+      }
     }
   }
 
@@ -258,6 +268,9 @@ class CacheManager {
    * Persist cache to localStorage
    */
   private persistToStorage(): void {
+    // Only run in browser environment
+    if (typeof window === 'undefined') return
+    
     try {
       const entries = Array.from(this.cache.values())
       localStorage.setItem(this.STORAGE_KEY, JSON.stringify(entries))
@@ -326,6 +339,9 @@ class CacheManager {
    * Start automatic cleanup interval with enhanced focused cleanup
    */
   private startCleanupInterval(): void {
+    // Only run in browser environment
+    if (typeof window === 'undefined') return
+    
     // Enhanced cleanup every 3 minutes for better performance
     setInterval(() => {
       this.cleanupExpiredEntries()
@@ -368,6 +384,9 @@ class CacheManager {
    * Setup storage event listener for cross-tab sync
    */
   private setupStorageSync(): void {
+    // Only run in browser environment
+    if (typeof window === 'undefined') return
+    
     window.addEventListener('storage', (event) => {
       if (event.key === this.STORAGE_KEY) {
         console.log('Cache: Detected storage change, reloading cache')
@@ -653,6 +672,224 @@ class CacheManager {
       return new Blob([serialized]).size
     } catch {
       return 0
+    }
+  }
+
+  /**
+   * USER-SPECIFIC CACHE ISOLATION METHODS
+   * Prevents cache leakage between different user accounts
+   */
+
+  /**
+   * Generate user-specific cache key
+   */
+  private getUserCacheKey(baseKey: string, userId?: string): string {
+    if (!userId) {
+      // Try to get current user from session manager
+      try {
+        const { userSessionManager } = require('./user-session-manager')
+        const session = userSessionManager.getCurrentSession()
+        userId = session?.userId
+      } catch (error) {
+        console.warn('Cache: Could not get current user session:', error)
+      }
+    }
+    
+    if (!userId) {
+      return baseKey // Fallback to non-user-specific key
+    }
+    
+    return `user_${userId}_${baseKey}`
+  }
+
+  /**
+   * Set user-specific cache entry
+   */
+  setUserCache<T>(key: string, data: T, ttl: number = this.DEFAULT_TTL, userId?: string): void {
+    const userKey = this.getUserCacheKey(key, userId)
+    
+    try {
+      const entry: CacheEntry<T> = {
+        data,
+        timestamp: Date.now(),
+        ttl,
+        key: userKey,
+        version: this.VERSION,
+        userId: userId || this.getCurrentUserId() || undefined
+      }
+
+      this.cache.set(userKey, entry)
+      this.stats.totalEntries = this.cache.size
+      this.persistToStorage()
+      
+      console.log(`🔐 Cache: Stored user-specific entry '${userKey}' (TTL: ${ttl}ms)`)
+    } catch (error) {
+      console.error(`❌ Cache: Failed to store user-specific entry '${userKey}':`, error)
+    }
+  }
+
+  /**
+   * Get user-specific cache entry
+   */
+  getUserCache<T>(key: string, userId?: string): T | null {
+    const userKey = this.getUserCacheKey(key, userId)
+    
+    try {
+      const entry = this.cache.get(userKey)
+      
+      if (!entry) {
+        this.stats.misses++
+        console.log(`🔐 Cache: Miss for user-specific key '${userKey}'`)
+        return null
+      }
+
+      // Check if entry has expired
+      if (Date.now() - entry.timestamp > entry.ttl) {
+        this.cache.delete(userKey)
+        this.stats.misses++
+        console.log(`🔐 Cache: Expired user-specific entry '${userKey}' removed`)
+        return null
+      }
+
+      // Check version compatibility
+      if (entry.version !== this.VERSION) {
+        this.cache.delete(userKey)
+        this.stats.misses++
+        console.log(`🔐 Cache: Version mismatch for user-specific '${userKey}', removed`)
+        return null
+      }
+
+      // Verify user ownership
+      const currentUserId = userId || this.getCurrentUserId()
+      if (entry.userId && currentUserId && entry.userId !== currentUserId) {
+        this.cache.delete(userKey)
+        this.stats.misses++
+        console.log(`🔐 Cache: User mismatch for '${userKey}', removed for security`)
+        return null
+      }
+
+      this.stats.hits++
+      console.log(`🔐 Cache: Hit for user-specific key '${userKey}'`)
+      return entry.data as T
+    } catch (error) {
+      console.error(`❌ Cache: Failed to retrieve user-specific entry '${userKey}':`, error)
+      this.stats.misses++
+      return null
+    }
+  }
+
+  /**
+   * Clear all cache entries for a specific user
+   */
+  clearUserCache(userId?: string): number {
+    const targetUserId = userId || this.getCurrentUserId()
+    if (!targetUserId) {
+      console.warn('🔐 Cache: No user ID provided for user cache clearing')
+      return 0
+    }
+
+    console.log(`🧹 Cache: Clearing all cache entries for user: ${targetUserId}`)
+    let deletedCount = 0
+    
+    // Clear entries with user-specific keys
+    const userKeyPattern = `user_${targetUserId}_`
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(userKeyPattern)) {
+        this.cache.delete(key)
+        deletedCount++
+      }
+    }
+    
+    // Clear entries with userId in the entry data
+    for (const [key, entry] of this.cache.entries()) {
+      if (entry.userId === targetUserId) {
+        this.cache.delete(key)
+        deletedCount++
+      }
+    }
+    
+    if (deletedCount > 0) {
+      this.stats.totalEntries = this.cache.size
+      this.persistToStorage()
+      console.log(`✅ Cache: Cleared ${deletedCount} cache entries for user ${targetUserId}`)
+    }
+    
+    return deletedCount
+  }
+
+  /**
+   * Clear all cache entries for all users (complete reset)
+   */
+  clearAllUserCaches(): number {
+    console.log('🧹 Cache: Clearing ALL user-specific cache entries')
+    let deletedCount = 0
+    
+    for (const key of this.cache.keys()) {
+      if (key.startsWith('user_')) {
+        this.cache.delete(key)
+        deletedCount++
+      }
+    }
+    
+    // Also clear entries that have userId set
+    for (const [key, entry] of this.cache.entries()) {
+      if (entry.userId) {
+        this.cache.delete(key)
+        deletedCount++
+      }
+    }
+    
+    if (deletedCount > 0) {
+      this.stats.totalEntries = this.cache.size
+      this.persistToStorage()
+      console.log(`✅ Cache: Cleared ${deletedCount} user-specific cache entries`)
+    }
+    
+    return deletedCount
+  }
+
+  /**
+   * Get current user ID from session manager
+   */
+  private getCurrentUserId(): string | null {
+    try {
+      const { userSessionManager } = require('./user-session-manager')
+      const session = userSessionManager.getCurrentSession()
+      return session?.userId || null
+    } catch (error) {
+      console.warn('Cache: Could not get current user ID:', error)
+      return null
+    }
+  }
+
+  /**
+   * Enhanced clear method that respects user isolation
+   */
+  clearWithUserIsolation(): void {
+    const currentUserId = this.getCurrentUserId()
+    
+    if (currentUserId) {
+      // Only clear current user's cache
+      console.log(`🔐 Cache: Clearing cache for current user: ${currentUserId}`)
+      this.clearUserCache(currentUserId)
+    } else {
+      // No current user, clear all non-user-specific cache
+      console.log('🧹 Cache: No current user, clearing all non-user-specific cache')
+      const keysToDelete: string[] = []
+      
+      for (const [key, entry] of this.cache.entries()) {
+        if (!key.startsWith('user_') && !entry.userId) {
+          keysToDelete.push(key)
+        }
+      }
+      
+      keysToDelete.forEach(key => this.cache.delete(key))
+      
+      if (keysToDelete.length > 0) {
+        this.stats.totalEntries = this.cache.size
+        this.persistToStorage()
+        console.log(`✅ Cache: Cleared ${keysToDelete.length} non-user-specific cache entries`)
+      }
     }
   }
 

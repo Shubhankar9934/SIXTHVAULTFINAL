@@ -57,9 +57,23 @@ export async function GET(req: NextRequest) {
     const email = searchParams.get('email')
     const code = searchParams.get('code')
 
+    // ENHANCED: Handle diagnostic requests gracefully
+    if (!email && !code) {
+      console.log('🔍 Auth Verify: Diagnostic request detected - returning status info')
+      return NextResponse.json({
+        status: 'ready',
+        message: 'Auth verification endpoint is operational',
+        methods: ['GET (with email & code params)', 'POST (with email & verificationCode body)'],
+        timestamp: new Date().toISOString()
+      }, { status: 200 })
+    }
+
     if (!email || !code) {
+      console.warn('🔍 Auth Verify: Missing required parameters:', { email: !!email, code: !!code })
       return NextResponse.redirect('/verify?error=Invalid verification link')
     }
+
+    console.log('🔍 Auth Verify: Processing verification link for:', email)
 
     const response = await fetch(`${RAG_API_URL}/auth/verify`, {
       method: "POST",
@@ -70,7 +84,7 @@ export async function GET(req: NextRequest) {
     })
 
     if (!response.ok) {
-      const data = await response.json()
+      const data = await response.json().catch(() => ({ detail: 'Unknown error' }))
       let errorMessage = "Verification failed"
       if (data.detail) {
         // Handle both string and object error formats
@@ -78,12 +92,14 @@ export async function GET(req: NextRequest) {
           ? data.detail
           : data.detail.msg || data.detail.message || JSON.stringify(data.detail)
       }
+      console.error('🔍 Auth Verify: Backend verification failed:', errorMessage)
       return NextResponse.redirect(`/verify?error=${encodeURIComponent(errorMessage)}`)
     }
 
+    console.log('✅ Auth Verify: Verification successful for:', email)
     return NextResponse.redirect('/verify?success=true')
   } catch (error) {
-    console.error("Verification link error:", error)
+    console.error("🔍 Auth Verify: Verification link error:", error)
     return NextResponse.redirect('/verify?error=Verification failed')
   }
 }

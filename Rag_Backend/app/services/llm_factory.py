@@ -1210,18 +1210,17 @@ async def health_check() -> Dict[str, Any]:
     return health
 
 async def initialize_all_enabled_models():
-    """Initialize ALL enabled models at startup for instant inference"""
-    print("🚀 INITIALIZING ALL ENABLED MODELS FOR INSTANT INFERENCE")
+    """Lazy initialization check for enabled models"""
+    print("🚀 CHECKING AVAILABLE PROVIDERS FOR LAZY LOADING")
     print("=" * 60)
     
-    initialization_results = {}
     total_start_time = time.time()
     
-    # Get all enabled providers
-    enabled_providers = [
-        (name, config) for name, config in config.providers.items() 
-        if config.enabled and has_required_credentials(name)
-    ]
+    # Get all enabled providers (don't actually initialize them)
+    enabled_providers = []
+    for name, provider_config in config.providers.items():
+        if provider_config.enabled and has_required_credentials(name):
+            enabled_providers.append(name)
     
     if not enabled_providers:
         print("⚠️ No enabled providers with valid credentials found")
@@ -1229,90 +1228,54 @@ async def initialize_all_enabled_models():
     
     print(f"📋 Found {len(enabled_providers)} enabled providers with credentials")
     
-    # Initialize each provider in parallel for maximum speed
-    async def initialize_provider(provider_name: str, provider_config: ProviderConfig):
-        """Initialize a single provider with detailed logging"""
-        start_time = time.time()
-        
-        try:
-            print(f"🔄 Initializing {provider_name}...")
-            
-            if provider_name == "bedrock":
-                if not _bedrock_client.initialized:
-                    await _bedrock_client.initialize()
-                result = {"status": "initialized", "models": provider_config.models}
-                
-                
-            elif provider_name == "groq":
-                if _groq_client.client is None:
-                    await _groq_client.initialize()
-                result = {"status": "initialized", "models": provider_config.models}
-                
-            elif provider_name == "openai":
-                if _openai_client.client is None:
-                    await _openai_client.initialize()
-                result = {"status": "initialized", "models": provider_config.models}
-                
-            elif provider_name == "gemini":
-                if not _gemini_client.initialized:
-                    await _gemini_client.initialize()
-                result = {"status": "initialized", "models": provider_config.models}
-                
-            elif provider_name == "deepseek":
-                if _deepseek_client.client is None:
-                    await _deepseek_client.initialize()
-                result = {"status": "initialized", "models": provider_config.models}
-                
-            else:
-                result = {"status": "skipped", "reason": "unknown_provider"}
-            
-            duration = time.time() - start_time
-            result["initialization_time"] = round(duration, 2)
-            
-            print(f"✅ {provider_name} initialized successfully in {duration:.2f}s")
-            return provider_name, result
-            
-        except Exception as e:
-            duration = time.time() - start_time
-            error_result = {
-                "status": "failed",
-                "error": str(e),
-                "initialization_time": round(duration, 2)
-            }
-            print(f"❌ {provider_name} failed to initialize: {e}")
-            return provider_name, error_result
-    
-    # Initialize all providers in parallel
-    initialization_tasks = [
-        initialize_provider(name, provider_config) 
-        for name, provider_config in enabled_providers
-    ]
-    
-    results = await asyncio.gather(*initialization_tasks, return_exceptions=True)
-    
-    # Process results
+    # Just verify credentials without initializing models
     successful_providers = []
     failed_providers = []
     
-    for result in results:
-        if isinstance(result, Exception):
-            failed_providers.append(f"unknown: {result}")
-        else:
-            provider_name, provider_result = result
-            initialization_results[provider_name] = provider_result
+    for provider_name in enabled_providers:
+        try:
+            print(f"🔍 Checking {provider_name} credentials...")
             
-            if provider_result["status"] == "initialized":
-                successful_providers.append(provider_name)
-            else:
-                failed_providers.append(f"{provider_name}: {provider_result.get('error', 'unknown')}")
+            # Quick credential check without model initialization
+            if provider_name == "bedrock":
+                if settings.aws_bedrock_access_key_id and settings.aws_bedrock_secret_access_key:
+                    successful_providers.append(provider_name)
+                else:
+                    failed_providers.append(f"{provider_name}: missing credentials")
+            elif provider_name == "groq":
+                if settings.groq_api_key:
+                    successful_providers.append(provider_name)
+                else:
+                    failed_providers.append(f"{provider_name}: missing API key")
+            elif provider_name == "openai":
+                if settings.openai_api_key:
+                    successful_providers.append(provider_name)
+                else:
+                    failed_providers.append(f"{provider_name}: missing API key")
+            elif provider_name == "gemini":
+                if settings.gemini_api_key:
+                    successful_providers.append(provider_name)
+                else:
+                    failed_providers.append(f"{provider_name}: missing API key")
+            elif provider_name == "deepseek":
+                if settings.deepseek_api_key:
+                    successful_providers.append(provider_name)
+                else:
+                    failed_providers.append(f"{provider_name}: missing API key")
+            
+            print(f"✅ {provider_name} credentials verified")
+            
+        except Exception as e:
+            print(f"❌ {provider_name} credential check failed: {e}")
+            failed_providers.append(f"{provider_name}: {str(e)}")
     
     total_duration = time.time() - total_start_time
     
     # Summary
     print("=" * 60)
-    print(f"🎉 MODEL INITIALIZATION COMPLETE in {total_duration:.2f}s")
-    print(f"✅ Successfully initialized: {len(successful_providers)} providers")
-    print(f"❌ Failed to initialize: {len(failed_providers)} providers")
+    print(f"🎉 PROVIDER CHECK COMPLETE in {total_duration:.2f}s")
+    print(f"✅ Available providers: {len(successful_providers)}")
+    print(f"❌ Unavailable providers: {len(failed_providers)}")
     
     if successful_providers:
         print(f"📦 Ready providers: {', '.join(successful_providers)}")
@@ -1320,13 +1283,7 @@ async def initialize_all_enabled_models():
     if failed_providers:
         print(f"⚠️ Failed providers: {', '.join(failed_providers)}")
     
-    # Warm up test for successful providers
-    if successful_providers:
-        print("🔥 PERFORMING WARM-UP TEST...")
-        warmup_success = await perform_warmup_test(successful_providers[:2])  # Test top 2 providers
-        print(f"🔥 Warm-up test: {'✅ PASSED' if warmup_success else '⚠️ PARTIAL'}")
-    
-    print("⚡ ALL MODELS READY FOR INSTANT INFERENCE!")
+    print("⚡ PROVIDERS READY FOR LAZY INITIALIZATION!")
     print("=" * 60)
     
     return {
@@ -1334,7 +1291,6 @@ async def initialize_all_enabled_models():
         "total_duration": round(total_duration, 2),
         "successful_providers": successful_providers,
         "failed_providers": failed_providers,
-        "initialization_results": initialization_results,
         "ready_for_inference": len(successful_providers) > 0
     }
 

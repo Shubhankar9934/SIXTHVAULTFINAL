@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
-import { Upload, FileText, X, CheckCircle, AlertCircle, Loader2 } from "lucide-react"
+import { Upload, FileText, X, CheckCircle, AlertCircle, Loader2, Home, LogOut } from "lucide-react"
 import Link from "next/link"
 import SixthvaultLogo from "@/components/SixthvaultLogo"
 import { ragApiClient, type UploadResponse, type WebSocketMessage } from "@/lib/api-client"
@@ -30,14 +30,39 @@ interface UploadedFile {
 }
 
 function UploadPageContent() {
-  const { logout } = useAuth()
+  const { logout, user, isAuthenticated } = useAuth()
   const [files, setFiles] = useState<UploadedFile[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const [totalProgress, setTotalProgress] = useState(0)
   const [processingDocuments, setProcessingDocuments] = useState<ProcessingDocument[]>([])
+  const [accessDenied, setAccessDenied] = useState(false)
+  const [loading, setLoading] = useState(true)
+
+  // Check admin access on mount
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setLoading(false)
+      return
+    }
+
+    if (!user || !user.is_admin || user.role !== 'admin') {
+      console.log('Upload page: Access denied - user is not admin:', user)
+      setAccessDenied(true)
+      setLoading(false)
+      return
+    }
+
+    console.log('Upload page: Admin access confirmed for user:', user.email)
+    setAccessDenied(false)
+    setLoading(false)
+  }, [isAuthenticated, user])
 
   // Initialize background processing and subscribe to updates
   useEffect(() => {
+    if (!isAuthenticated || !user || accessDenied) {
+      return
+    }
+
     // Initialize background processing and load documents
     documentStore.initializeBackgroundProcessing();
     documentStore.getDocuments();
@@ -48,7 +73,76 @@ function UploadPageContent() {
     return () => {
       unsubscribe();
     };
-  }, []);
+  }, [isAuthenticated, user, accessDenied]);
+
+  // Show access denied screen for non-admin users
+  if (accessDenied) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/20 to-indigo-50/10 flex items-center justify-center">
+        <Card className="w-full max-w-md border-0 shadow-2xl bg-white/95 backdrop-blur-xl">
+          <CardHeader className="text-center">
+            <div className="mx-auto w-16 h-16 bg-gradient-to-br from-red-100 to-red-200 rounded-2xl flex items-center justify-center mb-6 shadow-lg">
+              <AlertCircle className="w-8 h-8 text-red-600" />
+            </div>
+            <CardTitle className="text-2xl font-bold bg-gradient-to-r from-red-700 to-red-800 bg-clip-text text-transparent">
+              Access Denied
+            </CardTitle>
+            <CardDescription className="text-gray-600 text-lg">
+              Admin privileges required for document upload
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="text-center space-y-6">
+            <div className="p-4 bg-gradient-to-r from-red-50 to-red-100 rounded-xl border border-red-200">
+              <p className="text-sm text-red-700 font-medium">
+                Only admin users can upload and manage documents.
+              </p>
+              <p className="text-xs text-red-600 mt-2">
+                Regular users can search, query, and read assigned documents only.
+              </p>
+            </div>
+            <div className="flex flex-col space-y-3">
+              <Link href="/vault">
+                <Button className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold shadow-lg hover:shadow-xl transition-all duration-300">
+                  <Home className="w-4 h-4 mr-2" />
+                  Go to Vault
+                </Button>
+              </Link>
+              <Button variant="outline" onClick={logout} className="w-full border-2 hover:bg-gray-50">
+                <LogOut className="w-4 h-4 mr-2" />
+                Logout
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
+  // Loading screen
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/20 to-indigo-50/10 flex items-center justify-center">
+        <Card className="w-full max-w-lg border-0 shadow-2xl bg-white/95 backdrop-blur-xl">
+          <CardContent className="text-center p-12">
+            <div className="mb-8">
+              <SixthvaultLogo size="full" />
+            </div>
+            <div className="mb-8">
+              <div className="animate-spin rounded-full h-20 w-20 border-4 border-blue-200 border-t-blue-600 mx-auto mb-6"></div>
+            </div>
+            <div className="space-y-4">
+              <h2 className="text-3xl font-bold bg-gradient-to-r from-blue-700 via-indigo-700 to-purple-700 bg-clip-text text-transparent">
+                Loading Upload Interface
+              </h2>
+              <p className="text-xl font-semibold text-slate-700">
+                Preparing document upload system...
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -396,224 +490,6 @@ function UploadPageContent() {
     })
   }
 
-  const processFilesSequentially = async (fileList: File[], currentFile: number, totalFiles: number) => {
-    const file = fileList[0] // Only one file at a time
-
-    // Create temporary file for UI with unique ID
-    const tempFile: UploadedFile = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: file.name,
-      size: file.size,
-      type: file.type,
-      status: "uploading",
-      progress: 0,
-      processingOrder: currentFile - 1, // Track processing order
-    }
-
-    setFiles((prev) => [...prev, tempFile])
-
-    try {
-      console.log(`📤 Uploading file ${currentFile}/${totalFiles}: ${file.name}`)
-      
-      const uploadResponse = await ragApiClient.uploadFiles(fileList)
-      console.log('Upload response:', uploadResponse)
-      const batchId = uploadResponse.batch_id
-
-      // Update file to processing status
-      setFiles((prev) => 
-        prev.map((f) => {
-          if (f.id === tempFile.id) {
-            return { 
-              ...f, 
-              status: "processing", 
-              progress: 10,
-              batchId: batchId
-            }
-          }
-          return f
-        })
-      )
-
-      // Sequential Progress Management System for Single File
-      let isCleanedUp = false
-      let progressInterval: NodeJS.Timeout | null = null
-      let batchProgressTracker = {
-        totalFiles: 1, // Single file processing
-        completedFiles: 0,
-        currentProcessingFile: 0,
-        isSequentialProcessing: true,
-        baseProgressPerFile: 90, // Full 90% for this single file
-        priorityFileCompleted: false
-      }
-      
-      // Sequential Progress Calculator
-      const calculateSequentialProgress = (fileIndex: number, stage: string): number => {
-        const baseProgress = batchProgressTracker.baseProgressPerFile * fileIndex
-        let stageProgress = 0
-        
-        // Define stage progress within each file's allocation
-        switch (stage) {
-          case 'uploading':
-            stageProgress = 0.1 * batchProgressTracker.baseProgressPerFile
-            break
-          case 'processing_started':
-            stageProgress = 0.2 * batchProgressTracker.baseProgressPerFile
-            break
-          case 'processing':
-            stageProgress = 0.6 * batchProgressTracker.baseProgressPerFile
-            break
-          case 'completing':
-            stageProgress = 0.9 * batchProgressTracker.baseProgressPerFile
-            break
-          case 'completed':
-            stageProgress = batchProgressTracker.baseProgressPerFile
-            break
-        }
-        
-        return Math.min(baseProgress + stageProgress, 90)
-      }
-
-      // Create reliable WebSocket connection with deduplication
-      const reliableWS = ragApiClient.createReliableWebSocket(batchId, (message: any) => {
-        try {
-          console.log('Sequential WebSocket message:', message)
-
-          switch (message.type) {
-            case 'queued':
-              setFiles((prev) => prev.map((f) => 
-                f.batchId === batchId ? { ...f, status: "processing", progress: Math.max(f.progress, 10) } : f
-              ))
-              break
-
-            case 'processing':
-              // Update progress based on sequential order
-              setFiles((prev) => prev.map((f) => {
-                if (f.batchId === batchId && f.status === "processing") {
-                  const currentProgress = calculateSequentialProgress(f.processingOrder || 0, 'processing')
-                  return { ...f, progress: Math.max(f.progress, Math.min(currentProgress, 90)) }
-                }
-                return f
-              }))
-              break
-
-            case 'completed':
-              // CRITICAL FIX: Handle file completion with proper deduplication
-              if (message.data?.file || message.data?.filename) {
-                const messageFileName = message.data.file || message.data.filename
-                
-                setFiles((prev) => {
-                  // Find all matching files (both processing and potentially duplicated)
-                  const matchingFiles = prev.filter(f => 
-                    f.batchId === batchId && (
-                      f.name === messageFileName || 
-                      f.name.includes(messageFileName) || 
-                      messageFileName.includes(f.name)
-                    )
-                  )
-                  
-                  if (matchingFiles.length === 0) return prev
-                  
-                  // DEDUPLICATION: Keep only the first matching file, remove duplicates
-                  const primaryFile = matchingFiles[0]
-                  const duplicateIds = matchingFiles.slice(1).map(f => f.id)
-                  
-                  console.log('🔄 DEDUPLICATING FILES:', {
-                    filename: messageFileName,
-                    totalMatches: matchingFiles.length,
-                    primaryFileId: primaryFile.id,
-                    duplicatesToRemove: duplicateIds
-                  })
-                  
-                  // Remove duplicates and update the primary file
-                  const updatedFiles = prev
-                    .filter(f => !duplicateIds.includes(f.id)) // Remove duplicates
-                    .map((f) => {
-                      if (f.id === primaryFile.id) {
-                        const completedData = message.data
-                        
-                        return {
-                          ...f,
-                          status: "completed" as const,
-                          progress: 100,
-                          language: completedData?.language || "English",
-                          themes: completedData?.themes || ["Document Analysis"],
-                          demographics: completedData?.demographics || []
-                        }
-                      }
-                      return f
-                    })
-                  
-                  return updatedFiles
-                })
-              } else {
-                // Complete all files in batch
-                setFiles((prev) => prev.map((f) => 
-                  f.batchId === batchId ? { 
-                    ...f, 
-                    status: "completed", 
-                    progress: 100,
-                    language: message.data?.language || "English",
-                    themes: message.data?.themes || ["Document Analysis"],
-                    demographics: message.data?.demographics || []
-                  } : f
-                ))
-              }
-              
-              // Cleanup after completion
-              setTimeout(() => {
-                if (!isCleanedUp) {
-                  reliableWS.disconnect()
-                  isCleanedUp = true
-                }
-              }, 1000)
-              break
-              
-            case 'error':
-              setFiles((prev) => prev.map((f) => 
-                f.batchId === batchId ? { ...f, status: "error", progress: 0 } : f
-              ))
-              reliableWS.disconnect()
-              break
-
-            default:
-              // Handle other message types with progress updates
-              setFiles((prev) => prev.map((f) => {
-                if (f.batchId === batchId && f.status === "processing") {
-                  const newProgress = Math.max(f.progress, message.data?.progress || f.progress)
-                  return { ...f, progress: Math.min(newProgress, 90) }
-                }
-                return f
-              }))
-              break
-          }
-        } catch (error) {
-          console.error('Error handling WebSocket message:', error)
-        }
-      })
-
-      // Start the connection
-      await reliableWS.connect()
-
-      // Auto cleanup after 10 minutes
-      setTimeout(() => {
-        if (!isCleanedUp) {
-          reliableWS.disconnect()
-          isCleanedUp = true
-        }
-      }, 600000)
-
-    } catch (error) {
-      console.error('Upload failed:', error)
-      // Update temp file to error state
-      setFiles((prev) => 
-        prev.map((f) => 
-          f.id === tempFile.id
-            ? { ...f, status: "error", progress: 0 }
-            : f
-        )
-      )
-    }
-  }
 
   const removeFile = (fileId: string) => {
     setFiles((prev) => prev.filter((f) => f.id !== fileId))

@@ -159,6 +159,7 @@ async def get_all_providers(
         raise HTTPException(status_code=500, detail="Failed to fetch providers")
 
 @router.get("/health", response_model=List[ProviderHealthResponse])
+@router.head("/health", response_model=List[ProviderHealthResponse])
 async def get_providers_health(
     current_user: User = Depends(get_current_user)
 ):

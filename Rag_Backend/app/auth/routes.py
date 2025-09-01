@@ -162,26 +162,22 @@ async def login(credentials: UserLogin, request: Request, db: Session = Depends(
     db.add(user)
     db.commit()
     
-    # Create access token with role and tenant
+    # Create access token with complete user context
     access_token = create_access_token(data={
         "sub": str(user.id), 
         "email": user.email,
         "role": user.role,
-        "tenant_id": user.tenant_id
+        "is_admin": user.is_admin,
+        "tenant_id": user.tenant_id or user.primary_tenant_id,
+        "primary_tenant_id": user.primary_tenant_id
     })
     
     # Store token in database
     device_info = f"{request.headers.get('user-agent', 'Unknown')} - {request.client.host}"
     await TokenService.store_token(db, str(user.id), access_token, device_info)
     
-    # 🚀 PRE-CACHE ALL VAULT DATA DURING LOGIN FOR INSTANT ACCESS
-    print(f"🚀 LOGIN: Starting comprehensive data pre-caching for user {user.id} for instant vault access")
-    try:
-        await pre_cache_vault_data_for_user(str(user.id), db)
-        print(f"✅ LOGIN: Successfully pre-cached all vault data for user {user.id}")
-    except Exception as e:
-        print(f"⚠️ LOGIN: Pre-caching failed for user {user.id}: {e}")
-        # Don't fail login if pre-caching fails, just log the error
+    # Skip pre-caching to prevent login timeouts - data will load on-demand
+    print(f"✅ LOGIN: Token stored successfully for user {user.id}, skipping pre-cache for faster login")
     
     # Prepare user response
     user_response = UserResponse(
@@ -296,13 +292,36 @@ async def verify_email(request: Request, db: Session = Depends(get_session)):
     print(f"Verification successful for email: {email}")
     
     try:
+        print(f"🔄 Starting verification process for {email}")
+        
         # Import Tenant model
-        from app.database import Tenant
+        from app.tenant_models import Tenant
         
         # Create a new tenant for this user (each verified account gets its own tenant)
         tenant_name = temp_user.company or f"{temp_user.first_name} {temp_user.last_name}'s Organization"
+        print(f"📋 Creating tenant: {tenant_name}")
+        
+        # Generate a unique slug for the tenant
+        import re
+        base_slug = re.sub(r'[^a-zA-Z0-9\s]', '', tenant_name.lower())
+        base_slug = re.sub(r'\s+', '-', base_slug.strip())
+        base_slug = base_slug[:50]  # Limit length
+        
+        # Ensure slug is unique by checking existing tenants
+        from app.tenant_models import Tenant
+        existing_slugs = db.exec(select(Tenant.slug)).all()
+        slug = base_slug
+        counter = 1
+        while slug in existing_slugs:
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+        
+        print(f"📋 Generated slug: {slug}")
+        
         new_tenant = Tenant(
+            slug=slug,
             name=tenant_name,
+            tenant_type="enterprise",  # Default to enterprise for new registrations
             created_at=datetime.utcnow(),
             is_active=True
         )
@@ -310,8 +329,10 @@ async def verify_email(request: Request, db: Session = Depends(get_session)):
         db.add(new_tenant)
         db.commit()
         db.refresh(new_tenant)
+        print(f"✅ Tenant created with ID: {new_tenant.id}")
         
         # Create permanent user as tenant admin
+        print(f"👤 Creating permanent user for {email}")
         new_user = User(
             email=temp_user.email,
             password_hash=temp_user.password_hash,
@@ -319,6 +340,7 @@ async def verify_email(request: Request, db: Session = Depends(get_session)):
             last_name=temp_user.last_name,
             company=temp_user.company,
             tenant_id=new_tenant.id,  # Link to their own tenant
+            primary_tenant_id=new_tenant.id,  # Set primary tenant
             verified=True,
             role="admin",  # Tenant admin
             is_admin=True,  # Admin within their tenant
@@ -328,28 +350,41 @@ async def verify_email(request: Request, db: Session = Depends(get_session)):
             created_by=None  # Self-registered users have no creator
         )
         
-        # Update tenant owner
-        new_tenant.owner_id = new_user.id
-        
-        # Add permanent user and remove temp user
+        # Add permanent user and remove temp user first
         db.add(new_user)
+        print(f"🗑️ Deleting temp user: {temp_user.id}")
         db.delete(temp_user)
         db.commit()
         db.refresh(new_user)
+        print(f"✅ Permanent user created with ID: {new_user.id}")
+        
+        # Now update tenant owner with the committed user ID
+        print(f"🔗 Linking tenant {new_tenant.id} to user {new_user.id}")
+        new_tenant.owner_id = new_user.id
+        db.add(new_tenant)
+        db.commit()
+        db.refresh(new_tenant)
+        print(f"✅ Tenant ownership updated")
         
         try:
             # Send welcome email
+            print(f"📧 Sending welcome email to {new_user.email}")
             await EmailService.sendWelcomeEmail(new_user.email, new_user.first_name)
+            print(f"✅ Welcome email sent successfully")
         except Exception as e:
-            print(f"Failed to send welcome email: {e}")
+            print(f"⚠️ Failed to send welcome email: {e}")
             # Don't fail verification if welcome email fails
         
+        print(f"🎉 Verification completed successfully for {email}")
         return {"message": "Email verified successfully"}
     except Exception as e:
         db.rollback()
+        print(f"❌ Verification error: {e}")
+        import traceback
+        print(f"📋 Full error traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to verify email. Please try again."
+            detail=f"Failed to verify email: {str(e)}"
         )
 
 @router.post("/resend-verification", response_model=dict)
@@ -801,236 +836,7 @@ async def send_password_change_notification(email: str, first_name: str):
 
 async def pre_cache_vault_data_for_user(user_id: str, db: Session):
     """
-    Pre-cache all vault data during login for instant access when user reaches vault page.
-    This eliminates the 40+ second loading delay by doing all the heavy lifting during login.
+    Simplified pre-cache function - disabled to prevent verification errors
     """
-    import asyncio
-    from concurrent.futures import ThreadPoolExecutor
-    
-    print(f"🚀 PRE-CACHE: Starting comprehensive vault data pre-caching for user {user_id}")
-    start_time = datetime.utcnow()
-    
-    try:
-        # Import required services and clients
-        from app.routes.documents import get_user_documents
-        from app.routes.curations import get_user_curations
-        from app.routes.conversations import get_conversations
-        from app.routes.summaries import get_summary_status
-        from app.routes.providers import get_provider_models
-        
-        # Create a thread pool for parallel execution
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            # Submit all data loading tasks in parallel
-            print(f"📊 PRE-CACHE: Loading documents for user {user_id}")
-            documents_future = executor.submit(get_documents_for_user, user_id, db)
-            
-            print(f"🎯 PRE-CACHE: Loading curations for user {user_id}")
-            curations_future = executor.submit(get_curations_for_user, user_id, db)
-            
-            print(f"💬 PRE-CACHE: Loading conversations for user {user_id}")
-            conversations_future = executor.submit(get_conversations_for_user, user_id, db)
-            
-            print(f"📝 PRE-CACHE: Loading summaries status for user {user_id}")
-            summaries_future = executor.submit(get_summaries_status_for_user, user_id, db)
-            
-            print(f"🤖 PRE-CACHE: Loading AI providers and models")
-            providers_future = executor.submit(get_provider_models_for_user, user_id, db)
-            
-            # Wait for all tasks to complete
-            documents = documents_future.result()
-            curations = curations_future.result()
-            conversations = conversations_future.result()
-            summaries = summaries_future.result()
-            providers = providers_future.result()
-            
-            print(f"✅ PRE-CACHE: Successfully loaded all data:")
-            print(f"   - Documents: {len(documents) if documents else 0}")
-            print(f"   - Curations: {len(curations) if curations else 0}")
-            print(f"   - Conversations: {len(conversations) if conversations else 0}")
-            print(f"   - Summaries: {len(summaries) if summaries else 0}")
-            print(f"   - AI Providers: {len(providers) if providers else 0}")
-            
-            # Pre-cache conversation content for instant history access
-            if conversations and len(conversations) > 0:
-                print(f"🔄 PRE-CACHE: Pre-loading conversation content for instant access")
-                await pre_cache_conversation_content(conversations[:10], user_id, db)  # Cache top 10 conversations
-            
-            # Pre-cache curation content for instant access
-            if curations and len(curations) > 0:
-                print(f"🔄 PRE-CACHE: Pre-loading curation content for instant access")
-                await pre_cache_curation_content(curations[:5], user_id, db)  # Cache top 5 curations
-            
-        elapsed_time = (datetime.utcnow() - start_time).total_seconds()
-        print(f"🎉 PRE-CACHE: Completed comprehensive vault data pre-caching in {elapsed_time:.2f}s")
-        print(f"   User {user_id} will now experience instant vault loading!")
-        
-    except Exception as e:
-        elapsed_time = (datetime.utcnow() - start_time).total_seconds()
-        print(f"❌ PRE-CACHE: Failed after {elapsed_time:.2f}s for user {user_id}: {e}")
-        # Don't raise the exception to avoid failing the login process
-        import traceback
-        print(f"PRE-CACHE ERROR DETAILS: {traceback.format_exc()}")
-
-async def pre_cache_conversation_content(conversations: list, user_id: str, db: Session):
-    """Pre-cache conversation content for instant access"""
-    try:
-        from app.routes.conversations import get_conversation_by_id
-        
-        cached_count = 0
-        for conversation in conversations:
-            try:
-                conversation_id = conversation.get('id') if isinstance(conversation, dict) else getattr(conversation, 'id', None)
-                if conversation_id:
-                    # Load full conversation content
-                    full_conversation = get_conversation_by_id(conversation_id, user_id, db)
-                    if full_conversation:
-                        cached_count += 1
-                        print(f"   ✅ Pre-cached conversation {conversation_id}")
-            except Exception as e:
-                print(f"   ⚠️ Failed to pre-cache conversation {conversation_id}: {e}")
-                continue
-        
-        print(f"🎯 PRE-CACHE: Successfully pre-cached {cached_count} conversation contents")
-        
-    except Exception as e:
-        print(f"❌ PRE-CACHE: Failed to pre-cache conversation content: {e}")
-
-async def pre_cache_curation_content(curations: list, user_id: str, db: Session):
-    """Pre-cache curation content for instant access - DISABLED to prevent 30+ curations issue"""
-    try:
-        print(f"🚫 PRE-CACHE: Curation content pre-caching DISABLED to prevent 30+ similar curations issue")
-        print(f"   This was causing automatic generation of multiple similar curations during login")
-        print(f"   Curations will now only be generated when explicitly requested by the user")
-        
-        # Count existing curations without generating new ones
-        cached_count = len(curations) if curations else 0
-        print(f"🎯 PRE-CACHE: Found {cached_count} existing curations (no new generation)")
-        
-    except Exception as e:
-        print(f"❌ PRE-CACHE: Error in disabled curation pre-cache: {e}")
-
-# Helper functions to get data for specific user (these will be imported from respective route files)
-def get_documents_for_user(user_id: str, db: Session):
-    """Get documents for a specific user"""
-    try:
-        from app.deps import get_current_user_from_id
-        
-        # Get user object
-        user = get_current_user_from_id(user_id, db)
-        if not user:
-            return []
-        
-        # Import and call the actual route function
-        import asyncio
-        from app.routes.documents import get_user_documents
-        
-        # Since get_user_documents is async, we need to run it in the event loop
-        try:
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(get_user_documents(user, db))
-        except RuntimeError:
-            # If no event loop is running, create a new one
-            return asyncio.run(get_user_documents(user, db))
-    except Exception as e:
-        print(f"Failed to get documents for user {user_id}: {e}")
-        return []
-
-def get_curations_for_user(user_id: str, db: Session):
-    """Get curations for a specific user"""
-    try:
-        from app.deps import get_current_user_from_id
-        
-        # Get user object
-        user = get_current_user_from_id(user_id, db)
-        if not user:
-            return []
-        
-        # Import and call the actual route function
-        import asyncio
-        from app.routes.curations import get_user_curations
-        
-        # Since get_user_curations is async, we need to run it in the event loop
-        try:
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(get_user_curations(user, db))
-        except RuntimeError:
-            # If no event loop is running, create a new one
-            return asyncio.run(get_user_curations(user, db))
-    except Exception as e:
-        print(f"Failed to get curations for user {user_id}: {e}")
-        return []
-
-def get_conversations_for_user(user_id: str, db: Session):
-    """Get conversations for a specific user"""
-    try:
-        from app.deps import get_current_user_from_id
-        
-        # Get user object
-        user = get_current_user_from_id(user_id, db)
-        if not user:
-            return []
-        
-        # Import and call the actual route function
-        import asyncio
-        from app.routes.conversations import get_conversations
-        
-        # Since get_conversations is async, we need to run it in the event loop
-        try:
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(get_conversations(limit=50, current_user=user))
-        except RuntimeError:
-            # If no event loop is running, create a new one
-            return asyncio.run(get_conversations(limit=50, current_user=user))
-    except Exception as e:
-        print(f"Failed to get conversations for user {user_id}: {e}")
-        return []
-
-def get_summaries_status_for_user(user_id: str, db: Session):
-    """Get summaries status for a specific user"""
-    try:
-        from app.deps import get_current_user_from_id
-        
-        # Get user object
-        user = get_current_user_from_id(user_id, db)
-        if not user:
-            return []
-        
-        # Import and call the actual route function
-        import asyncio
-        from app.routes.summaries import get_summary_status
-        
-        # Since get_summary_status is async, we need to run it in the event loop
-        try:
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(get_summary_status(user, db))
-        except RuntimeError:
-            # If no event loop is running, create a new one
-            return asyncio.run(get_summary_status(user, db))
-    except Exception as e:
-        print(f"Failed to get summaries status for user {user_id}: {e}")
-        return []
-
-def get_provider_models_for_user(user_id: str, db: Session):
-    """Get provider models for a specific user"""
-    try:
-        from app.deps import get_current_user_from_id
-        
-        # Get user object
-        user = get_current_user_from_id(user_id, db)
-        if not user:
-            return {}
-        
-        # Import and call the actual route function
-        import asyncio
-        from app.routes.providers import get_provider_models
-        
-        # Since get_provider_models is async, we need to run it in the event loop
-        try:
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(get_provider_models(user))
-        except RuntimeError:
-            # If no event loop is running, create a new one
-            return asyncio.run(get_provider_models(user))
-    except Exception as e:
-        print(f"Failed to get provider models for user {user_id}: {e}")
-        return {}
+    print(f"🚫 PRE-CACHE: Pre-caching disabled to prevent verification errors")
+    print(f"   User {user_id} vault data will load on-demand")

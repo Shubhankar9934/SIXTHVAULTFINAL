@@ -8,6 +8,7 @@ import time
 router = APIRouter(tags=["health"])
 
 @router.get("/health")
+@router.head("/health")
 async def health_check() -> Dict[str, Any]:
     """Comprehensive health check including S3 storage"""
     start_time = time.time()
@@ -47,11 +48,13 @@ async def health_check() -> Dict[str, Any]:
     return health_status
 
 @router.get("/health/s3")
+@router.head("/health/s3")
 async def s3_health_check() -> Dict[str, Any]:
     """Dedicated S3 health check endpoint"""
     return await check_s3_health()
 
 @router.get("/config/features")
+@router.head("/config/features")
 async def get_feature_config() -> Dict[str, Any]:
     """Get feature configuration including Ollama enabled status"""
     return {

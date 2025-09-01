@@ -17,7 +17,9 @@ import {
   RefreshCw,
   Plus,
   Filter,
-  MoreVertical
+  MoreVertical,
+  Loader2,
+  Mail
 } from 'lucide-react'
 import {
   Popover,
@@ -28,6 +30,8 @@ import { ragApiClient, type Conversation, type ConversationWithMessages } from '
 import { formatDistanceToNow } from 'date-fns'
 import { useVaultState } from '@/lib/vault-state-provider'
 import { cacheManager } from '@/lib/cache-manager'
+import { EmailShareModal } from '@/components/email-share-modal'
+import { useEmailShare, getUserInfoForEmail } from '@/hooks/use-email-share'
 
 interface HistorySectionProps {
   onConversationSelect?: (conversationId: string) => void
@@ -46,6 +50,14 @@ export default function HistorySection({
   const [searchQuery, setSearchQuery] = useState('')
   const [showArchived, setShowArchived] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null)
+
+  // Email sharing functionality
+  const userInfo = getUserInfoForEmail()
+  const emailShare = useEmailShare({
+    defaultSenderName: userInfo.senderName,
+    defaultSenderCompany: userInfo.senderCompany
+  })
 
   // Use conversations from vault state (preloaded)
   const conversations = state.conversations.data
@@ -89,6 +101,9 @@ export default function HistorySection({
 
   const loadConversation = async (conversationId: string) => {
     try {
+      // Set loading state immediately for visual feedback
+      setLoadingConversationId(conversationId)
+      
       // Immediately update UI to show selection for instant visual feedback
       dispatch({ type: 'SET_SELECTED_CONVERSATION', payload: conversationId })
       console.log(`⚡ HistorySection: Instantly selected conversation ${conversationId} for immediate UI feedback`)
@@ -103,6 +118,7 @@ export default function HistorySection({
           if (cachedConversation && onHistoryCardClick) {
             console.log(`✅ HistorySection: Loading conversation ${conversationId} instantly from preloaded cache`)
             onHistoryCardClick(cachedConversation.conversation, cachedConversation.messages)
+            setLoadingConversationId(null) // Clear loading state
             return // Exit early - conversation loaded instantly!
           }
         } catch (error) {
@@ -117,6 +133,7 @@ export default function HistorySection({
       if (cachedConversationData && onHistoryCardClick) {
         console.log(`✅ HistorySection: Loading conversation ${conversationId} instantly from individual cache`)
         onHistoryCardClick(cachedConversationData.conversation, cachedConversationData.messages)
+        setLoadingConversationId(null) // Clear loading state
         return // Exit early - conversation loaded instantly!
       }
       
@@ -135,6 +152,9 @@ export default function HistorySection({
       }
     } catch (error) {
       console.error('Failed to load conversation:', error)
+    } finally {
+      // Always clear loading state
+      setLoadingConversationId(null)
     }
   }
 
@@ -214,6 +234,64 @@ export default function HistorySection({
     if (conversation.is_pinned) return Pin
     if (conversation.is_archived) return Archive
     return MessageSquare
+  }
+
+  const shareConversationAsEmail = async (conversation: Conversation, event: React.MouseEvent) => {
+    event.stopPropagation()
+    
+    try {
+      // Load conversation messages if not already loaded
+      const conversationCacheKey = `conversation_content_${conversation.id}`
+      let conversationData = cacheManager.get<any>(conversationCacheKey)
+      
+      if (!conversationData) {
+        // Load from API if not cached
+        conversationData = await ragApiClient.getConversation(conversation.id)
+        if (conversationData) {
+          cacheManager.set(conversationCacheKey, conversationData, 24 * 60 * 60 * 1000)
+        }
+      }
+      
+      if (conversationData && conversationData.messages) {
+        // Format conversation for email
+        const messages = conversationData.messages.map((msg: any) => ({
+          role: msg.role,
+          content: msg.content,
+          timestamp: msg.timestamp
+        }))
+        
+        // Create formatted conversation content
+        let conversationContent = `# ${conversation.title}\n\n`
+        conversationContent += `**Date:** ${new Date(conversation.created_at).toLocaleDateString()}\n\n`
+        
+        messages.forEach((message: any, index: number) => {
+          const timestamp = message.timestamp 
+            ? new Date(message.timestamp).toLocaleString()
+            : `Message ${index + 1}`
+          
+          if (message.role === 'user') {
+            conversationContent += `## 👤 User (${timestamp})\n${message.content}\n\n`
+          } else {
+            conversationContent += `## 🤖 Assistant (${timestamp})\n${message.content}\n\n`
+          }
+        })
+        
+        // Share as RAG query with conversation content
+        emailShare.shareRagQuery({
+          query: `Full Conversation: ${conversation.title}`,
+          answer: conversationContent,
+          title: `Chat History - ${conversation.title}`,
+          metadata: {
+            provider: 'SIXTHVAULT',
+            model: 'Chat History',
+            responseTime: messages.length * 100, // Approximate based on message count
+            mode: 'conversation_export'
+          }
+        })
+      }
+    } catch (error) {
+      console.error('Failed to share conversation as email:', error)
+    }
   }
 
   return (
@@ -340,6 +418,7 @@ export default function HistorySection({
                   .map((conversation) => {
                     const IconComponent = getConversationIcon(conversation)
                     const isSelected = selectedConversationId === conversation.id
+                    const isLoading = loadingConversationId === conversation.id
                     
                     return (
                       <div
@@ -349,20 +428,29 @@ export default function HistorySection({
                             ? "border-blue-200 bg-blue-50 shadow-md"
                             : conversation.is_archived
                               ? "border-gray-200 bg-gray-50 cursor-not-allowed opacity-60"
-                              : "border-gray-200 bg-white hover:border-blue-300 hover:shadow-md hover:bg-blue-50/30"
+                              : isLoading
+                                ? "border-blue-300 bg-blue-50/50 shadow-md"
+                                : "border-gray-200 bg-white hover:border-blue-300 hover:shadow-md hover:bg-blue-50/30"
                         }`}
                         onClick={() => loadConversation(conversation.id)}
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center space-x-3 flex-1 min-w-0">
-                            <IconComponent className={`w-4 h-4 flex-shrink-0 ${
-                              isSelected ? "text-blue-600" : "text-gray-500"
-                            }`} />
+                            {isLoading ? (
+                              <Loader2 className="w-4 h-4 flex-shrink-0 text-blue-600 animate-spin" />
+                            ) : (
+                              <IconComponent className={`w-4 h-4 flex-shrink-0 ${
+                                isSelected ? "text-blue-600" : "text-gray-500"
+                              }`} />
+                            )}
                             <span className={`text-sm truncate ${
-                              isSelected ? "text-blue-900 font-medium" : "text-gray-700"
+                              isSelected ? "text-blue-900 font-medium" : isLoading ? "text-blue-800 font-medium" : "text-gray-700"
                             }`}>
                               {conversation.title}
                             </span>
+                            {isLoading && (
+                              <span className="text-xs text-blue-600 font-medium">Loading...</span>
+                            )}
                           </div>
                           
                           <Popover>
@@ -382,6 +470,15 @@ export default function HistorySection({
                             </PopoverTrigger>
                             <PopoverContent className="w-40 p-1" align="end">
                               <div className="space-y-1">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="w-full justify-start text-xs h-8"
+                                  onClick={(e) => shareConversationAsEmail(conversation, e)}
+                                >
+                                  <Mail className="w-3 h-3 mr-2" />
+                                  Send as Email
+                                </Button>
                                 <Button
                                   variant="ghost"
                                   size="sm"
@@ -430,6 +527,14 @@ export default function HistorySection({
           </div>
         </CardContent>
       </Card>
+
+      {/* Email Share Modal */}
+      <EmailShareModal
+        isOpen={emailShare.isModalOpen}
+        onClose={emailShare.closeModal}
+        data={emailShare.currentData!}
+        onSend={emailShare.handleSendEmail}
+      />
     </div>
   )
 }

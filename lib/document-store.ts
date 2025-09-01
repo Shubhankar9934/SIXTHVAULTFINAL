@@ -1,5 +1,6 @@
 import { ragApiClient, type BackendDocument } from './api-client'
 import { aiCurationService } from './ai-curation-service'
+import { documentSyncManager } from './document-sync-manager'
 
 export interface DocumentData {
   id: string
@@ -46,10 +47,7 @@ export interface ProcessingDocument {
 }
 
 class DocumentStore {
-  // Remove all localStorage - make everything backend-first
-  private cache: DocumentData[] = []
-  private cacheTimestamp: number = 0
-  private readonly CACHE_TTL = 60000 // Increased to 60 seconds for ngrok stability
+  // NO CACHING - always load fresh from backend
   private isLoading: boolean = false
   private loadPromise: Promise<DocumentData[]> | null = null
   
@@ -99,40 +97,24 @@ class DocumentStore {
   }
 
   /**
-   * Check if cache is valid
-   */
-  private isCacheValid(): boolean {
-    return Date.now() - this.cacheTimestamp < this.CACHE_TTL
-  }
-
-  /**
-   * Load documents from backend with enhanced error handling
+   * Load documents from backend - NO CACHING
    */
   private async loadFromBackend(): Promise<DocumentData[]> {
     try {
-      console.log('DocumentStore: Fetching documents from backend (ngrok-enhanced)')
+      console.log('DocumentStore: Fetching documents from backend - NO CACHING')
       const backendDocs = await ragApiClient.getUserDocuments()
       
-      // Convert and cache
-      this.cache = backendDocs.map(doc => this.convertBackendDocument(doc))
-      this.cacheTimestamp = Date.now()
+      // Convert documents
+      const documents = backendDocs.map(doc => this.convertBackendDocument(doc))
       
-      console.log('DocumentStore: Successfully cached', this.cache.length, 'documents')
+      console.log('DocumentStore: Successfully loaded', documents.length, 'documents from backend')
       
       // Notify all listeners of the update
-      this.notifyListeners()
+      this.notifyListeners(documents)
       
-      return this.cache
+      return documents
     } catch (error) {
       console.error('DocumentStore: Failed to get documents:', error)
-      
-      // Return cached data if available, even if stale (ngrok fallback)
-      if (this.cache.length > 0) {
-        console.log('DocumentStore: Returning stale cache due to error (ngrok fallback)')
-        return this.cache
-      }
-      
-      // If no cache available, throw the error for proper handling
       throw error
     }
   }
@@ -140,10 +122,10 @@ class DocumentStore {
   /**
    * Notify all listeners of document updates
    */
-  private notifyListeners(): void {
+  private notifyListeners(documents: DocumentData[]): void {
     this.updateListeners.forEach(listener => {
       try {
-        listener([...this.cache])
+        listener([...documents])
       } catch (error) {
         console.error('DocumentStore: Error notifying listener:', error)
       }
@@ -156,10 +138,12 @@ class DocumentStore {
   subscribeToUpdates(callback: (documents: DocumentData[]) => void): () => void {
     this.updateListeners.add(callback)
     
-    // Immediately call with current data if available
-    if (this.cache.length > 0) {
-      callback([...this.cache])
-    }
+    // FIXED: NO CACHE - load fresh data when subscribing
+    this.getDocuments().then(documents => {
+      callback([...documents])
+    }).catch(error => {
+      console.error('DocumentStore: Failed to load documents for subscription:', error)
+    })
     
     // Return unsubscribe function
     return () => {
@@ -235,7 +219,7 @@ class DocumentStore {
   /**
    * Handle document completion with AI data
    */
-  private handleDocumentCompletion(data: any, batchId: string): void {
+  private async handleDocumentCompletion(data: any, batchId: string): Promise<void> {
     console.log('DocumentStore: Handling document completion:', data)
 
     // Extract filename from path or use provided filename
@@ -246,38 +230,12 @@ class DocumentStore {
       return
     }
 
-    // Update cache with completed document data
-    let documentUpdated = false
-    this.cache = this.cache.map(doc => {
-      if (this.matchesDocument(doc, filename, data)) {
-        documentUpdated = true
-        console.log('DocumentStore: Updating document with AI data:', doc.name)
-        
-        return {
-          ...doc,
-          id: data.doc_id || doc.id,
-          summary: data.summary || doc.summary || '',
-          themes: data.themes || doc.themes || [],
-          keywords: data.keywords || data.themes || doc.keywords || [],
-          demographics: data.demographics || doc.demographics || [],
-          mainTopics: data.themes || doc.mainTopics || [],
-          keyInsights: data.insights ? [data.insights] : (doc.keyInsights || []),
-          language: data.language || doc.language || 'English',
-          sentiment: data.sentiment || doc.sentiment || 'neutral',
-          readingLevel: data.readingLevel || doc.readingLevel || 'intermediate'
-        }
-      }
-      return doc
-    })
-
-    if (documentUpdated) {
-      this.cacheTimestamp = Date.now()
-      this.notifyListeners()
-      console.log('DocumentStore: Document updated and listeners notified')
-    } else {
-      // Document not found in cache, refresh from backend
-      console.log('DocumentStore: Document not found in cache, refreshing from backend')
-      this.refreshDocuments()
+    // FIXED: NO CACHE - refresh documents from backend
+    try {
+      const documents = await this.loadFromBackend()
+      console.log('DocumentStore: Refreshed documents after completion, found:', documents.length)
+    } catch (error) {
+      console.error('DocumentStore: Failed to refresh documents after completion:', error)
     }
   }
 
@@ -301,46 +259,24 @@ class DocumentStore {
   /**
    * Handle batch completion
    */
-  private handleBatchCompletion(data: any, batchId: string): void {
+  private async handleBatchCompletion(data: any, batchId: string): Promise<void> {
     console.log('DocumentStore: Batch completion received:', data)
     
     // CRITICAL FIX: Immediately refresh documents to show completed processing
-    this.refreshDocuments().then(() => {
-      console.log('DocumentStore: Documents refreshed after batch completion')
+    try {
+      const documents = await this.loadFromBackend()
+      console.log('DocumentStore: Documents refreshed after batch completion, found:', documents.length)
       
-      // ADDITIONAL FIX: Trigger cross-tab sync event for vault page
-      try {
-        localStorage.setItem('sixthvault_document_upload_event', JSON.stringify({
-          type: 'batch_completed',
-          batchId: batchId,
-          timestamp: Date.now(),
-          documentCount: this.cache.length
-        }))
-        
-        // Remove the event after a short delay to allow other tabs to process it
-        setTimeout(() => {
-          localStorage.removeItem('sixthvault_document_upload_event')
-        }, 1000)
-        
-        console.log('DocumentStore: Triggered cross-tab sync event for vault page update')
-      } catch (error) {
-        console.error('DocumentStore: Failed to trigger cross-tab sync event:', error)
-      }
+      // ENHANCED SYNC: Use document sync manager for immediate vault updates
+      console.log('DocumentStore: Using document sync manager for batch completion notification')
+      documentSyncManager.emitBatchCompleted(batchId, documents.length, 'background')
       
-      // ADDITIONAL FIX: Force cache invalidation signal
-      try {
-        localStorage.setItem('sixthvault_cache_invalidate_documents', Date.now().toString())
-        setTimeout(() => {
-          localStorage.removeItem('sixthvault_cache_invalidate_documents')
-        }, 1000)
-        console.log('DocumentStore: Sent cache invalidation signal')
-      } catch (error) {
-        console.error('DocumentStore: Failed to send cache invalidation signal:', error)
-      }
+      // Also trigger immediate vault refresh for instant dropdown update
+      documentSyncManager.triggerImmediateVaultRefresh()
       
-    }).catch((error) => {
+    } catch (error) {
       console.error('DocumentStore: Failed to refresh documents after batch completion:', error)
-    })
+    }
     
     // Clean up WebSocket
     const ws = this.activeWebSockets.get(batchId)
@@ -381,73 +317,17 @@ class DocumentStore {
   }
 
   /**
-   * Add a new document to cache (for upload scenarios)
-   */
-  addDocumentToCache(document: DocumentData): void {
-    // Check if document already exists
-    const existingIndex = this.cache.findIndex(doc => doc.id === document.id || doc.name === document.name)
-    
-    if (existingIndex >= 0) {
-      // Update existing document
-      this.cache[existingIndex] = document
-    } else {
-      // Add new document
-      this.cache.push(document)
-    }
-    
-    this.cacheTimestamp = Date.now()
-    this.notifyListeners()
-  }
-
-  /**
-   * Update a document in cache
-   */
-  updateDocumentInCache(documentId: string, updates: Partial<DocumentData>): void {
-    const index = this.cache.findIndex(doc => doc.id === documentId)
-    
-    if (index >= 0) {
-      this.cache[index] = { ...this.cache[index], ...updates }
-      this.cacheTimestamp = Date.now()
-      this.notifyListeners()
-    }
-  }
-
-  /**
-   * Get all documents from backend (with enhanced caching and race condition prevention)
+   * Get all documents from backend - FIXED: Always fetch fresh data
    */
   async getDocuments(): Promise<DocumentData[]> {
+    console.log('DocumentStore: Fetching fresh documents from backend (no cache)')
+    
     try {
-      // If already loading, return the same promise to prevent race conditions
-      if (this.isLoading && this.loadPromise) {
-        console.log('DocumentStore: Returning existing load promise (race condition prevention)')
-        return this.loadPromise
-      }
-
-      // Use cache if valid and not empty
-      if (this.isCacheValid() && this.cache.length > 0) {
-        console.log('DocumentStore: Using cached documents (valid cache)')
-        return this.cache
-      }
-
-      // Start loading with race condition protection
-      this.isLoading = true
-      this.loadPromise = this.loadFromBackend()
-
-      try {
-        const result = await this.loadPromise
-        return result
-      } finally {
-        this.isLoading = false
-        this.loadPromise = null
-      }
+      const result = await this.loadFromBackend()
+      console.log(`DocumentStore: Successfully fetched ${result.length} documents`)
+      return result
     } catch (error) {
-      console.error('DocumentStore: Critical error in getDocuments:', error)
-      
-      // Reset loading state
-      this.isLoading = false
-      this.loadPromise = null
-      
-      // Return empty array as fallback
+      console.error('DocumentStore: Error fetching documents:', error)
       return []
     }
   }
@@ -508,15 +388,14 @@ class DocumentStore {
     try {
       const success = await ragApiClient.deleteDocument(id)
       if (success) {
-        // Remove from cache
-        const originalCacheLength = this.cache.length
-        this.cache = this.cache.filter(doc => doc.id !== id)
-        this.notifyListeners()
-        console.log('DocumentStore: Document deleted and removed from cache')
+        // FIXED: NO CACHE - just refresh from backend
+        await this.loadFromBackend()
+        console.log('DocumentStore: Document deleted and documents refreshed')
         
         // Handle AI curation cleanup based on remaining documents
         try {
-          if (this.cache.length === 0) {
+          const remainingDocuments = await this.getDocuments()
+          if (remainingDocuments.length === 0) {
             // All documents deleted - clear all curations
             await aiCurationService.handleAllDocumentsDeleted()
             console.log('DocumentStore: All documents deleted, cleared AI curations')
@@ -538,32 +417,29 @@ class DocumentStore {
   }
 
   /**
-   * Refresh cache - force reload from backend
+   * Refresh documents - force reload from backend
    */
   async refreshDocuments(): Promise<DocumentData[]> {
-    this.cache = []
-    this.cacheTimestamp = 0
     return await this.getDocuments()
   }
 
   /**
-   * Clear cache
+   * Clear cache (NO-OP since we don't cache)
    */
   clearCache(): void {
-    this.cache = []
-    this.cacheTimestamp = 0
-    this.notifyListeners()
-    console.log('DocumentStore: Cache cleared')
+    // NO CACHE - just notify listeners with empty array
+    this.notifyListeners([])
+    console.log('DocumentStore: Cache cleared (no-op)')
   }
 
   /**
-   * Get cache status
+   * Get cache status (NO CACHE)
    */
   getCacheStatus(): { size: number; age: number; valid: boolean } {
     return {
-      size: this.cache.length,
-      age: Date.now() - this.cacheTimestamp,
-      valid: this.isCacheValid()
+      size: 0,
+      age: 0,
+      valid: false
     }
   }
 
@@ -779,7 +655,7 @@ class DocumentStore {
   /**
    * Handle background document completion
    */
-  private handleBackgroundDocumentCompletion(data: any, batchId: string): void {
+  private async handleBackgroundDocumentCompletion(data: any, batchId: string): Promise<void> {
     const filename = this.extractFilename(data.file || data.filename || '')
     if (!filename) return
 
@@ -799,7 +675,7 @@ class DocumentStore {
         })
 
         // Also update the main document cache
-        this.handleDocumentCompletion(data, batchId)
+        await this.handleDocumentCompletion(data, batchId)
         break
       }
     }
@@ -840,7 +716,7 @@ class DocumentStore {
   /**
    * Handle background batch completion
    */
-  private handleBackgroundBatchCompletion(data: any, batchId: string): void {
+  private async handleBackgroundBatchCompletion(data: any, batchId: string): Promise<void> {
     console.log('DocumentStore: Background batch completion:', batchId)
     
     // Mark all remaining documents in batch as completed
@@ -855,7 +731,7 @@ class DocumentStore {
     }
 
     // Refresh main document cache
-    this.refreshDocuments()
+    await this.refreshDocuments()
 
     // Clean up WebSocket
     const ws = this.activeWebSockets.get(batchId)
@@ -919,14 +795,6 @@ class DocumentStore {
     this.updateListeners.clear()
     this.processingListeners.clear()
   }
-
-  // REMOVED METHODS (no longer needed):
-  // - addDocument() - handled by upload API
-  // - removeDocument() - use deleteDocument()
-  // - updateDocument() - handled by backend
-  // - clearDocuments() - use clearCache()
-  // - saveToStorage() - NO LOCAL STORAGE
-  // - loadFromStorage() - NO LOCAL STORAGE
 }
 
 export const documentStore = new DocumentStore()

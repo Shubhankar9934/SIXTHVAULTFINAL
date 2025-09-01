@@ -21,7 +21,7 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Create a JWT access token"""
+    """Create a JWT access token with tenant and role context"""
     to_encode = data.copy()
     now = datetime.utcnow()
     
@@ -30,10 +30,18 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     else:
         expire = now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
+    # Ensure required fields are present
+    required_fields = ["sub", "email"]
+    for field in required_fields:
+        if field not in to_encode:
+            raise ValueError(f"Missing required field: {field}")
+    
     to_encode.update({
         "exp": int(expire.timestamp()),
-        "iat": int(now.timestamp())
+        "iat": int(now.timestamp()),
+        "type": "access_token"
     })
+    
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -50,4 +58,38 @@ def extract_user_id_from_token(token: str) -> Optional[int]:
     payload = verify_token(token)
     if payload:
         return payload.get("sub")
+    return None
+
+def extract_tenant_id_from_token(token: str) -> Optional[str]:
+    """Extract tenant ID from JWT token"""
+    payload = verify_token(token)
+    if payload:
+        return payload.get("tenant_id")
+    return None
+
+def extract_user_role_from_token(token: str) -> Optional[str]:
+    """Extract user role from JWT token"""
+    payload = verify_token(token)
+    if payload:
+        return payload.get("role")
+    return None
+
+def extract_user_context_from_token(token: str) -> Optional[dict]:
+    """Extract complete user context from JWT token"""
+    payload = verify_token(token)
+    if payload:
+        user_context = {
+            "user_id": payload.get("sub"),
+            "email": payload.get("email"),
+            "tenant_id": payload.get("tenant_id"),
+            "role": payload.get("role"),
+            "is_admin": payload.get("is_admin", False)
+        }
+        print(f"🔍 JWT CONTEXT: Extracted user context from token:")
+        print(f"   - User ID: {user_context['user_id']}")
+        print(f"   - Email: {user_context['email']}")
+        print(f"   - Tenant ID: {user_context['tenant_id']}")
+        print(f"   - Role: {user_context['role']}")
+        print(f"   - Is Admin: {user_context['is_admin']}")
+        return user_context
     return None

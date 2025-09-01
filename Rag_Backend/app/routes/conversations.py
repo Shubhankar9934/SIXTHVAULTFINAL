@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
-from app.deps import get_current_user, get_current_user_optional
+from app.deps import get_current_user, get_current_user_optional, get_current_user_with_tenant, get_current_tenant_id_dependency
 from app.database import User
 from app.services.conversation_service import conversation_service
 from app.models import Conversation, Message, ConversationSettings
@@ -14,18 +14,21 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 # Simple health check route for debugging
 @router.get("/health")
+@router.head("/health")
 async def conversations_health():
     """Health check for conversations router"""
     return {"status": "healthy", "message": "Conversations router is working"}
 
 # Debug route to test basic functionality
 @router.get("/debug")
+@router.head("/debug")
 async def conversations_debug():
     """Debug endpoint to test basic router functionality"""
     return {"status": "debug", "message": "Debug endpoint working", "endpoint": "/conversations/debug"}
 
 # Test route without dependencies
 @router.get("/test-no-deps")
+@router.head("/test-no-deps")
 async def test_no_dependencies():
     """Test endpoint without any dependencies"""
     return {"status": "success", "message": "No dependencies endpoint working", "data": []}
@@ -147,13 +150,14 @@ def message_to_response(msg: Message) -> MessageResponse:
 @router.post("", response_model=ConversationResponse)
 async def create_conversation(
     request: CreateConversationRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_with_tenant),
+    tenant_id: str = Depends(get_current_tenant_id_dependency)
 ):
     """Create a new conversation"""
     try:
         conversation = conversation_service.create_conversation(
             user_id=current_user.id,
-            tenant_id=current_user.tenant_id,
+            tenant_id=tenant_id,
             title=request.title,
             auto_generate_title=request.auto_generate_title
         )
@@ -176,30 +180,26 @@ async def get_conversations(
 ):
     """Get user's conversations"""
     try:
-        # If user is not authenticated, return empty list
+        # If user is not authenticated, return empty list immediately
         if not current_user:
             logger.info("Unauthenticated request to conversations endpoint, returning empty list")
             return []
         
-        # FIXED: Parameters are already the correct types from FastAPI Query validation
-        # No need to convert them again - this was causing the TypeError
-        logger.info(f"Fetching conversations for user {current_user.id} with limit={limit}, offset={offset}")
+        # Get conversations from the database
         conversations = conversation_service.get_user_conversations(
             user_id=current_user.id,
-            tenant_id=current_user.tenant_id,
+            tenant_id=current_user.tenant_id if current_user else None,
             include_archived=include_archived,
             limit=limit,
             offset=offset,
             search_query=search
         )
         
-        logger.info(f"Found {len(conversations)} conversations for user {current_user.id}")
+        logger.info(f"Retrieved {len(conversations)} conversations for user {current_user.id}")
         return [conversation_to_response(conv) for conv in conversations]
         
     except Exception as e:
-        logger.error(f"Error fetching conversations: {e}")
-        logger.error(f"Error type: {type(e)}")
-        logger.error(f"Error args: {e.args}")
+        logger.error(f"Error retrieving conversations for user {current_user.id if current_user else 'unknown'}: {e}")
         # Return empty list instead of raising exception for better UX
         return []
 
@@ -208,19 +208,16 @@ async def get_conversation(
     conversation_id: str,
     message_limit: int = Query(100, ge=1, le=500, description="Number of messages to return"),
     message_offset: int = Query(0, ge=0, description="Number of messages to skip"),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_with_tenant),
+    tenant_id: str = Depends(get_current_tenant_id_dependency)
 ):
     """Get a specific conversation with its messages"""
     try:
-        # Ensure parameters are properly converted to expected types
-        limit_value = int(message_limit) if message_limit is not None else 100
-        offset_value = int(message_offset) if message_offset is not None else 0
-        
         # Get conversation
         conversation = conversation_service.get_conversation_by_id(
             conversation_id=conversation_id,
             user_id=current_user.id,
-            tenant_id=current_user.tenant_id
+            tenant_id=tenant_id
         )
         
         if not conversation:
@@ -230,9 +227,9 @@ async def get_conversation(
         messages = conversation_service.get_conversation_messages(
             conversation_id=conversation_id,
             user_id=current_user.id,
-            tenant_id=current_user.tenant_id,
-            limit=limit_value,
-            offset=offset_value
+            tenant_id=tenant_id,
+            limit=message_limit,
+            offset=message_offset
         )
         
         return ConversationWithMessagesResponse(
@@ -347,14 +344,11 @@ async def search_conversations(
 ):
     """Search conversations by content"""
     try:
-        # Ensure parameters are properly converted to expected types
-        limit_value = int(limit) if limit is not None else 20
-        
         results = conversation_service.search_conversations(
             user_id=current_user.id,
             tenant_id=current_user.tenant_id,
             query=q,
-            limit=limit_value
+            limit=limit
         )
         
         search_results = []
@@ -429,13 +423,10 @@ async def cleanup_old_conversations(
 ):
     """Archive old conversations based on age"""
     try:
-        # Ensure parameters are properly converted to expected types
-        days_old_value = int(days_old) if days_old is not None else 30
-        
         count = conversation_service.cleanup_old_conversations(
             user_id=current_user.id,
             tenant_id=current_user.tenant_id,
-            days_old=days_old_value
+            days_old=days_old
         )
         
         logger.info(f"Archived {count} old conversations for user {current_user.id}")

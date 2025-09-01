@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Send, Loader2, Clock, Calendar, Share2, Download, MessageSquare } from "lucide-react"
 import { ragApiClient, type Message, type Conversation } from "@/lib/api-client"
+import { formatContentWithMath } from "@/components/ui/math-renderer"
 
 interface ChatMessage {
   id: number
@@ -114,30 +115,10 @@ export default function ChatBox({
     setError("")
   }
 
-  // Function to format content with better typography
+  // Function to format content with better typography and math support
   const formatContent = (content: string) => {
-    // Replace markdown headings with styled headings
-    let formattedContent = content
-      .replace(/^# (.*?)$/gm, '<h2 class="text-xl font-bold mt-6 mb-3 text-gray-800">$1</h2>')
-      .replace(/^## (.*?)$/gm, '<h3 class="text-lg font-bold mt-5 mb-2 text-gray-800">$1</h3>')
-      .replace(/^### (.*?)$/gm, '<h4 class="text-base font-bold mt-4 mb-2 text-gray-800">$1</h4>')
-      // Format lists
-      .replace(/^\* (.*?)$/gm, '<li class="ml-4 list-disc my-1">$1</li>')
-      .replace(/^\d+\. (.*?)$/gm, '<li class="ml-4 list-decimal my-1">$1</li>')
-      // Format bold and italic
-      .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*(.*?)\*/g, "<em>$1</em>")
-      // Format paragraphs
-      .replace(/\n\n/g, '</p><p class="my-3">')
-      // Format line breaks
-      .replace(/\n/g, "<br>")
-
-    // Wrap in paragraph if not already
-    if (!formattedContent.startsWith("<h") && !formattedContent.startsWith("<p")) {
-      formattedContent = `<p class="my-3">${formattedContent}</p>`
-    }
-
-    return formattedContent
+    // Use the enhanced math-enabled formatter
+    return formatContentWithMath(content)
   }
 
   return (

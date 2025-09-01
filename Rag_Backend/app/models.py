@@ -6,11 +6,19 @@ from sqlalchemy import Column, JSON   # ← import SQLAlchemy's JSON type
 from app.database import User  # Import from database instead of auth.models
 
 class Document(SQLModel, table=True):
+    __tablename__ = "documents"
+    
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     owner_id: str = Field(foreign_key="users.id")
     tenant_id: Optional[str] = Field(foreign_key="tenants.id")  # Add tenant isolation
     path: str
     filename: str  # Store original filename without UUID prefix
+    
+    # File metadata
+    file_size: Optional[int] = Field(default=0)  # Store file size in bytes
+    content_type: Optional[str] = Field(default=None)  # Store MIME type
+    s3_key: Optional[str] = Field(default=None)  # Store S3 key for cloud storage
+    s3_bucket: Optional[str] = Field(default=None)  # Store S3 bucket name
 
     # store the lists as a JSON column
     tags: List[str] | None = Field(default=None, sa_column=Column(JSON))

@@ -72,6 +72,8 @@ import { ragApiClient, type BackendDocument, type WebSocketMessage, type Availab
 import { RouteGuard } from "@/components/route-guard"
 import { useAuth } from "@/lib/auth-context"
 import { useVaultState } from "@/lib/vault-state-provider"
+import { documentSyncManager } from "@/lib/document-sync-manager"
+import { uploadStateManager } from "@/lib/upload-state-manager"
 
 interface Document {
   id: string
@@ -107,6 +109,8 @@ function DocumentsPageContent() {
   const [processingDocuments, setProcessingDocuments] = useState<ProcessingDocument[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [isInitialLoading, setIsInitialLoading] = useState(true)
+  const [loadingMessage, setLoadingMessage] = useState("Initializing document system...")
   const [newTags, setNewTags] = useState<Record<string, string>>({})
   const [newKeywords, setNewKeywords] = useState<Record<string, string>>({})
   const [newDemographics, setNewDemographics] = useState<Record<string, string>>({})
@@ -609,7 +613,7 @@ function DocumentsPageContent() {
     }
   }, [selectedDocument])
 
-  // FIXED: Proper integration with document store background processing
+  // OPTIMIZED: Proper integration with document store background processing with immediate loading feedback
   useEffect(() => {
     let isMounted = true
     let unsubscribeFromUpdates: (() => void) | null = null
@@ -618,15 +622,24 @@ function DocumentsPageContent() {
     const initializeDocuments = async () => {
       try {
         console.log('Documents: Initializing with document store integration')
+        setLoadingMessage("Connecting to document system...")
         
         // STEP 1: Initialize background processing in document store
         documentStore.initializeBackgroundProcessing()
+        setLoadingMessage("Loading processing documents...")
         
         // STEP 2: Load processing documents from document store
         const processingDocs = documentStore.getProcessingDocuments()
         console.log('Documents: Found', processingDocs.length, 'processing documents')
         
+        // Show immediate feedback if we have processing documents
+        if (processingDocs.length > 0) {
+          setLoadingMessage(`Found ${processingDocs.length} documents in progress...`)
+          setIsInitialLoading(false) // Show processing documents immediately
+        }
+        
         // STEP 3: Load completed documents from document store
+        setLoadingMessage("Loading completed documents...")
         const completedDocs = await documentStore.getDocuments()
         console.log('Documents: Loaded', completedDocs.length, 'completed documents')
         
@@ -693,6 +706,10 @@ function DocumentsPageContent() {
         // Set all documents at once
         setDocuments(allDocuments)
         console.log('Documents: Set', allDocuments.length, 'total documents (', processingDocs.length, 'processing,', completedDocs.length, 'completed)')
+        
+        // Clear loading state now that we have documents
+        setIsInitialLoading(false)
+        setLoadingMessage("Documents loaded successfully!")
         
         // STEP 5: Subscribe to completed document updates
         unsubscribeFromUpdates = documentStore.subscribeToUpdates((updatedCompletedDocs) => {
@@ -937,12 +954,16 @@ function DocumentsPageContent() {
 
     if (validFiles.length === 0) return
 
+    // UPLOAD STATE INTEGRATION: Start tracking uploads globally
+    console.log('🔄 STARTING UPLOAD STATE TRACKING for', validFiles.length, 'files')
+    const uploadDocumentIds = uploadStateManager.startUpload(validFiles)
+    
     // ULTIMATE FIX: True isolated file processing with distinct progress tracking
     console.log('🔄 STARTING ISOLATED FILE PROCESSING for', validFiles.length, 'files')
     
     // First, add ALL files to UI immediately with different starting progress for visual distinction
     const tempDocuments: Document[] = validFiles.map((file, index) => ({
-      id: `isolated_${index}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      id: uploadDocumentIds[index], // Use upload state manager IDs
       name: file.name,
       size: file.size,
       type: file.type,
@@ -1050,6 +1071,11 @@ function DocumentsPageContent() {
         
         // Log with both backend and safe progress values for debugging
         console.log(`🔄 PROGRESS SYNC for ${file.name}: Backend=${backendProgress}% → UI=${safeProgress}% - ${statusMessage}`)
+        
+        // Update upload state manager
+        const status = newStage === 'processing' || newStage === 'ai_processing' || newStage === 'ws_processing' ? 'processing' : 
+                     newStage === 'preparing' || newStage === 'uploaded' ? 'uploading' : 'uploading'
+        uploadStateManager.updateDocumentProgress(isolatedDocId, safeProgress, status)
         
         setDocuments((prev) => 
           prev.map((doc) => {
@@ -1173,14 +1199,20 @@ function DocumentsPageContent() {
                           })
                         )
 
-                        // IMMEDIATE CROSS-TAB NOTIFICATION: Signal vault page to refresh documents immediately
-                        console.log('📡 Documents: Signaling vault page for immediate document refresh')
-                        localStorage.setItem('sixthvault_document_upload_event', Date.now().toString())
-                        localStorage.removeItem('sixthvault_document_upload_event') // Trigger storage event
+                        // ENHANCED CROSS-TAB NOTIFICATION: Use document sync manager for immediate vault updates
+                        console.log('📡 Documents: Using document sync manager for immediate vault notification')
+                        const completedData = message.data || {}
+                        documentSyncManager.emitUploadCompleted(
+                          completedData.doc_id || isolatedDocId,
+                          file.name,
+                          'documents_page'
+                        )
                         
-                        // Also trigger cache invalidation signal
-                        localStorage.setItem('sixthvault_cache_invalidate_documents', Date.now().toString())
-                        localStorage.removeItem('sixthvault_cache_invalidate_documents')
+                        // Also trigger immediate vault refresh for instant dropdown update
+                        documentSyncManager.triggerImmediateVaultRefresh()
+                        
+                        // Update upload state manager
+                        uploadStateManager.completeDocument(isolatedDocId)
                 
                 isolatedProgress.value = 100
                 setTimeout(completeIsolatedFile, 600)
@@ -1193,6 +1225,9 @@ function DocumentsPageContent() {
                   clearInterval(isolatedTimer)
                   isolatedTimer = null
                 }
+                
+                // Update upload state manager with error
+                uploadStateManager.errorDocument(isolatedDocId, message.data?.error || 'Processing failed')
                 
                 setDocuments((prev) => 
                   prev.map((doc) => {
@@ -2354,40 +2389,14 @@ function DocumentsPageContent() {
     if (!deleteDialog.document) return
 
     const documentToDelete = deleteDialog.document
+    
+    // Set loading state but keep dialog open
     setDeleteDialog(prev => ({ ...prev, isDeleting: true }))
 
-    // INSTANT FRONTEND REMOVAL: Remove document from UI immediately for better UX
-    console.log('🚀 Documents: Instantly removing document from frontend:', documentToDelete.name)
-    
-    // Remove from local state immediately (optimistic update)
-    setDocuments((prev) => prev.filter((d) => d.id !== documentToDelete.id))
-    
-    // Clear selected document if it's the one being deleted
-    if (selectedDocument?.id === documentToDelete.id) {
-      setSelectedDocument(null)
-    }
-
-    // Close dialog immediately
-    setDeleteDialog({
-      isOpen: false,
-      document: null,
-      isDeleting: false
-    })
-
-    // IMMEDIATE CROSS-TAB NOTIFICATION: Signal all other tabs to refresh immediately
-    console.log('📡 Documents: Signaling all tabs for immediate document removal')
-    localStorage.setItem('sixthvault_document_delete_event', JSON.stringify({
-      documentId: documentToDelete.id,
-      documentName: documentToDelete.name,
-      timestamp: Date.now()
-    }))
-    localStorage.removeItem('sixthvault_document_delete_event') // Trigger storage event
-
-    // BACKGROUND DELETION: Process backend deletion in background
     try {
-      console.log('🔄 Documents: Processing backend deletion in background for:', documentToDelete.name)
+      console.log('🔄 Documents: Starting backend deletion for:', documentToDelete.name)
       
-      // Call backend delete API in background
+      // Call backend delete API and wait for response
       const success = await ragApiClient.deleteDocument(documentToDelete.id)
       
       if (!success) {
@@ -2395,6 +2404,26 @@ function DocumentsPageContent() {
       }
 
       console.log('✅ Documents: Backend deletion successful for:', documentToDelete.name)
+      
+      // FRONTEND REMOVAL: Remove document from UI after successful backend deletion
+      console.log('🚀 Documents: Removing document from frontend after backend success:', documentToDelete.name)
+      
+      // Remove from local state
+      setDocuments((prev) => prev.filter((d) => d.id !== documentToDelete.id))
+      
+      // Clear selected document if it's the one being deleted
+      if (selectedDocument?.id === documentToDelete.id) {
+        setSelectedDocument(null)
+      }
+
+      // CROSS-TAB NOTIFICATION: Signal all other tabs to refresh
+      console.log('📡 Documents: Signaling all tabs for document removal')
+      localStorage.setItem('sixthvault_document_delete_event', JSON.stringify({
+        documentId: documentToDelete.id,
+        documentName: documentToDelete.name,
+        timestamp: Date.now()
+      }))
+      localStorage.removeItem('sixthvault_document_delete_event') // Trigger storage event
       
       // CACHE INVALIDATION: Clear all document-related caches after successful backend deletion
       console.log('🗑️ Documents: Clearing document caches after backend deletion')
@@ -2439,30 +2468,22 @@ function DocumentsPageContent() {
       } catch (refreshError) {
         console.error('❌ Documents: Failed to refresh document store:', refreshError)
       }
+
+      // Close dialog after successful deletion
+      setDeleteDialog({
+        isOpen: false,
+        document: null,
+        isDeleting: false
+      })
       
     } catch (error) {
       console.error('❌ Documents: Backend deletion failed for:', documentToDelete.name, error)
       
-      // ROLLBACK: Re-add document to UI if backend deletion failed
-      console.log('🔄 Documents: Rolling back frontend deletion due to backend failure')
-      setDocuments((prev) => {
-        // Check if document is already back (avoid duplicates)
-        if (prev.some(d => d.id === documentToDelete.id)) {
-          return prev
-        }
-        // Re-add the document at the beginning to make it visible
-        return [documentToDelete, ...prev]
-      })
-      
       // Show error message to user
-      alert(`Failed to delete "${documentToDelete.name}": ${error instanceof Error ? error.message : 'Unknown error'}. The document has been restored.`)
+      alert(`Failed to delete "${documentToDelete.name}": ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`)
       
-      // Send rollback signal to other tabs
-      localStorage.setItem('sixthvault_document_delete_rollback', JSON.stringify({
-        document: documentToDelete,
-        timestamp: Date.now()
-      }))
-      localStorage.removeItem('sixthvault_document_delete_rollback')
+      // Reset dialog state to allow retry
+      setDeleteDialog(prev => ({ ...prev, isDeleting: false }))
     }
   }, [deleteDialog.document, selectedDocument, refreshDocuments])
 
@@ -2530,6 +2551,98 @@ function DocumentsPageContent() {
       avgProcessingTime: documents.filter(d => d.processingTime).reduce((sum, d) => sum + (d.processingTime || 0), 0) / Math.max(documents.filter(d => d.processingTime).length, 1)
     }
   }, [documents])
+
+  // Show loading state while documents are being initialized
+  if (isInitialLoading) {
+    return (
+      <div className="min-h-screen bg-white relative overflow-hidden">
+        {/* Beautiful flowing wave background - Hidden on mobile for clean look */}
+        <div className="absolute inset-0 z-0 hidden md:block">
+          <svg className="absolute inset-0 w-full h-full" viewBox="0 0 1440 800" preserveAspectRatio="xMidYMid slice">
+            <defs>
+              <linearGradient id="waveGradient1-loading" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#e0f2fe" stopOpacity="0.6"/>
+                <stop offset="25%" stopColor="#b3e5fc" stopOpacity="0.4"/>
+                <stop offset="50%" stopColor="#81d4fa" stopOpacity="0.3"/>
+                <stop offset="75%" stopColor="#4fc3f7" stopOpacity="0.2"/>
+                <stop offset="100%" stopColor="#29b6f6" stopOpacity="0.1"/>
+              </linearGradient>
+            </defs>
+            
+            <g stroke="url(#waveGradient1-loading)" strokeWidth="1.5" fill="none" opacity="0.8">
+              <path d="M0,200 Q200,120 400,180 T800,160 Q1000,140 1200,180 T1440,160"/>
+              <path d="M0,220 Q240,140 480,200 T960,180 Q1200,160 1440,200"/>
+              <path d="M0,240 Q180,160 360,220 T720,200 Q900,180 1080,220 T1440,200"/>
+            </g>
+            
+            <path d="M0,250 Q200,170 400,230 T800,210 Q1000,190 1200,230 T1440,210 L1440,800 L0,800 Z" fill="url(#waveGradient1-loading)" opacity="0.08"/>
+          </svg>
+        </div>
+
+        {/* Modern Header */}
+        <div className="bg-white/80 backdrop-blur-xl border-b border-gray-200/50 sticky top-0 z-50">
+          <div className="max-w-7xl mx-auto px-6 py-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-4">
+                <div className="flex items-center space-x-3">
+                  <div className="w-10 h-10 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-xl flex items-center justify-center">
+                    <Database className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h1 className="text-2xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 bg-clip-text text-transparent">
+                      Document Intelligence Hub
+                    </h1>
+                    <p className="text-sm text-gray-500">{loadingMessage}</p>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="flex items-center space-x-4">
+                <div className="flex items-center space-x-2 bg-blue-50 px-3 py-2 rounded-lg">
+                  <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+                  <span className="text-sm font-medium text-blue-700">Loading Documents</span>
+                </div>
+                <Button 
+                  onClick={logout}
+                  className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-medium transition-colors duration-200"
+                >
+                  <LogOut className="w-4 h-4 mr-2" />
+                  Logout
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Loading Content */}
+        <div className="flex-1 p-6">
+          <div className="text-center py-16">
+            <div className="w-20 h-20 bg-gradient-to-br from-blue-100 to-indigo-100 rounded-full flex items-center justify-center mx-auto mb-6 animate-pulse">
+              <Database className="w-10 h-10 text-blue-600" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900 mb-3">Loading Your Documents</h2>
+            <p className="text-gray-600 mb-6 max-w-md mx-auto">
+              {loadingMessage}
+            </p>
+            <div className="flex items-center justify-center space-x-6 text-sm text-gray-500">
+              <div className="flex items-center space-x-2">
+                <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
+                <span>Loading documents</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                <span>Preparing AI analysis</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                <span>Setting up interface</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-white relative overflow-hidden">
@@ -3094,7 +3207,7 @@ function DocumentsPageContent() {
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-4">
-                      {filteredDocuments.slice(0, 5).map((doc) => (
+                      {filteredDocuments.map((doc) => (
                         <div key={doc.id} className="flex items-center justify-between p-4 bg-gray-50/50 rounded-lg hover:bg-gray-100/50 transition-colors">
                           <div className="flex items-center space-x-4">
                             <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
@@ -4079,7 +4192,7 @@ function DocumentsPageContent() {
       </div>
 
       {/* Professional Delete Confirmation Dialog */}
-      <AlertDialog open={deleteDialog.isOpen} onOpenChange={(open) => !open && !deleteDialog.isDeleting && cancelDeleteDocument()}>
+      <AlertDialog open={deleteDialog.isOpen} onOpenChange={() => {}}>
         <AlertDialogContent className="max-w-md">
           <AlertDialogHeader>
             <AlertDialogTitle className="flex items-center space-x-3">
@@ -4099,14 +4212,15 @@ function DocumentsPageContent() {
           </AlertDialogDescription>
 
           <AlertDialogFooter className="mt-6 space-x-3">
-            <AlertDialogCancel 
+            <Button
               onClick={cancelDeleteDocument}
               disabled={deleteDialog.isDeleting}
+              variant="outline"
               className="bg-gray-100 hover:bg-gray-200 text-gray-700"
             >
               Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
+            </Button>
+            <Button
               onClick={confirmDeleteDocument}
               disabled={deleteDialog.isDeleting}
               className="bg-red-600 hover:bg-red-700 text-white min-w-[120px]"
@@ -4122,7 +4236,7 @@ function DocumentsPageContent() {
                   <span>Delete Forever</span>
                 </div>
               )}
-            </AlertDialogAction>
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

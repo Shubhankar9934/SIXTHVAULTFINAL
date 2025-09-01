@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 import statistics
 from app.services.llm_factory import get_llm, estimate_tokens, smart_truncate, chunk_text
+from app.utils.memory_manager import memory_monitor, memory_context
 
 # Enhanced ML imports with fallbacks
 try:
@@ -330,6 +331,7 @@ class EnhancedTagger:
             self._kw = None
             logger.warning("KeyBERT not available, using fallback methods")
     
+    @memory_monitor(threshold_mb=2000)
     async def make_tags(self, text: str, llm) -> List[str]:
         """
         Generate semantic topic tags with ultra-optimized processing for corporate documents
@@ -653,7 +655,35 @@ class EnhancedTagger:
             response = await llm.chat(prompt)
             if '[' in response and ']' in response:
                 json_str = re.search(r'\[.*\]', response, re.DOTALL).group()
-                return json.loads(json_str)[:self.config.final_tag_limit]
+                
+                # Clean the JSON string to handle common LLM formatting issues
+                cleaned_json = json_str.strip()
+                if cleaned_json.startswith('```json'):
+                    cleaned_json = cleaned_json[7:]
+                if cleaned_json.endswith('```'):
+                    cleaned_json = cleaned_json[:-3]
+                cleaned_json = cleaned_json.strip()
+                
+                # Handle empty or malformed responses
+                if not cleaned_json or cleaned_json in ['', '[]', 'null', 'None']:
+                    logger.warning("Empty or null JSON response from LLM")
+                    return self._extract_simple_keywords(text)[:self.config.final_tag_limit]
+                
+                try:
+                    parsed_tags = json.loads(cleaned_json)
+                    if isinstance(parsed_tags, list) and len(parsed_tags) > 0:
+                        # Validate each tag
+                        valid_tags = []
+                        for tag in parsed_tags:
+                            if tag and isinstance(tag, str) and len(tag.strip()) > 1:
+                                valid_tags.append(tag.strip())
+                        return valid_tags[:self.config.final_tag_limit] if valid_tags else self._extract_simple_keywords(text)[:self.config.final_tag_limit]
+                    else:
+                        logger.warning(f"Invalid JSON structure from LLM: {type(parsed_tags)}")
+                        return self._extract_simple_keywords(text)[:self.config.final_tag_limit]
+                except json.JSONDecodeError as json_error:
+                    logger.warning(f"JSON decode error in ultra-compact processing: {json_error}")
+                    return self._extract_simple_keywords(text)[:self.config.final_tag_limit]
             else:
                 # Fallback to simple extraction
                 return self._extract_simple_keywords(text)[:self.config.final_tag_limit]

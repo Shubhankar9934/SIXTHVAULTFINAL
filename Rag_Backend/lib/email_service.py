@@ -17,11 +17,11 @@ class EmailService:
 
     @staticmethod
     def _get_base_url() -> str:
-        """Get base URL"""
-        return "http://localhost:3000"  # Frontend URL
+        """Get base URL from settings"""
+        return settings.frontend_url
 
     @staticmethod
-    async def _send_email(to: str, subject: str, html_content: str, text_content: str) -> Dict[str, Any]:
+    async def _send_email(to: str, subject: str, html_content: str, text_content: str, from_email: Optional[str] = None, from_name: Optional[str] = None) -> Dict[str, Any]:
         """Send email using Resend API"""
         try:
             api_key = EmailService._get_api_key()
@@ -32,8 +32,23 @@ class EmailService:
                 "Content-Type": "application/json",
             }
             
+            # Always use the verified domain from settings for the sender
+            # This ensures we don't get domain verification errors
+            if from_name:
+                sender = f"{from_name} <noreply@{settings.email_domain}>"
+            else:
+                # Check if this is a verification email based on subject
+                if "verify" in subject.lower() or "verification" in subject.lower() or "reset" in subject.lower():
+                    sender = f"SIXTHVAULT <verify@{settings.email_domain}>"
+                else:
+                    # For general emails (like sharing), use a more generic sender
+                    sender = f"SIXTHVAULT <noreply@{settings.email_domain}>"
+            
+            # Store original recipient for testing mode workaround
+            original_recipient = to
+            
             payload = {
-                "from": f"SIXTHVAULT <verify@{settings.email_domain}>",
+                "from": sender,
                 "to": [to],
                 "subject": subject,
                 "html": html_content,
@@ -53,19 +68,69 @@ class EmailService:
                     print(f"Response Headers: {dict(response.headers)}")
                     print(f"Response Body: {error_data}")
                     
-                    # Check for testing limitation error
-                    if "testing emails to your own email address" in error_data.get("message", ""):
-                        print("=== RESEND TESTING MODE ===")
-                        print(f"You can only send emails to your verified email address during testing.")
-                        print(f"Email would be sent to: {to}")
-                        print(f"Subject: {subject}")
-                        print("=== END RESEND TESTING MODE ===")
-                        return {
-                            "success": True,
-                            "simulated": True,
-                            "messageId": f"resend-test-{datetime.utcnow().timestamp()}",
-                            "message": "Email simulated due to Resend testing limitations",
+                    # Check for testing limitation error - handle both message formats
+                    error_message = error_data.get("error", "") or error_data.get("message", "")
+                    if ("testing emails to your own email address" in error_message or 
+                        "verify a domain at resend.com/domains" in error_message or
+                        "domain is not verified" in error_message):
+                        
+                        print("=== RESEND TESTING MODE - ATTEMPTING WORKAROUND ===")
+                        print(f"Original target: {original_recipient}")
+                        print(f"Redirecting to verified address: sapien.cloud1@gmail.com")
+                        
+                        # Modify email content to show original recipient
+                        modified_subject = f"[FOR: {original_recipient}] {subject}"
+                        
+                        # Add recipient info to HTML content
+                        modified_html = f"""
+                        <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; margin-bottom: 20px; border-radius: 5px;">
+                            <strong>📧 Email Delivery Notice:</strong><br>
+                            This email was originally intended for: <strong>{original_recipient}</strong><br>
+                            Due to Resend testing limitations, it has been redirected to the verified address.
+                        </div>
+                        {html_content}
+                        """
+                        
+                        # Add recipient info to text content
+                        modified_text = f"""
+EMAIL DELIVERY NOTICE:
+This email was originally intended for: {original_recipient}
+Due to Resend testing limitations, it has been redirected to the verified address.
+
+---
+
+{text_content}
+                        """
+                        
+                        # Retry with verified email address
+                        workaround_payload = {
+                            "from": sender,
+                            "to": ["sapien.cloud1@gmail.com"],  # Use verified address
+                            "subject": modified_subject,
+                            "html": modified_html,
+                            "text": modified_text,
                         }
+                        
+                        workaround_response = await client.post(
+                            EmailService.RESEND_API_URL,
+                            headers=headers,
+                            json=workaround_payload
+                        )
+                        
+                        if workaround_response.is_success:
+                            result = workaround_response.json()
+                            print(f"✅ Email successfully sent to verified address: {result.get('id')}")
+                            print(f"   Original recipient: {original_recipient}")
+                            return {
+                                "success": True,
+                                "messageId": result.get("id"),
+                                "simulated": False,
+                                "redirected": True,
+                                "original_recipient": original_recipient,
+                                "actual_recipient": "sapien.cloud1@gmail.com"
+                            }
+                        else:
+                            print(f"❌ Workaround also failed: {workaround_response.text}")
                     
                     raise Exception(f"Resend API error: {error_data.get('message', response.text)}")
                 

@@ -29,6 +29,7 @@ from asyncio import Lock, TimeoutError as AsyncTimeoutError
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
+from pathlib import Path
 import logging
 
 # Import optimized configuration
@@ -118,6 +119,7 @@ from app.utils.qdrant_store import upsert
 from app.models import Document
 from app.database import engine
 from app.utils.processing_tracker import is_cancellation_requested, update_processing_status, ProcessingStatus
+from app.utils.tenant_validator import validate_tenant_before_processing, TenantValidationError
 
 # ─────────── ULTRA-FAST CHUNKER ─────────────────────────────────────────────────
 try:
@@ -552,6 +554,33 @@ async def lightning_process_file(owner_id: str, batch: str, path: str, provider:
         })
     
     try:
+        # STAGE 0: TENANT VALIDATION - Prevent foreign key constraint violations
+        try:
+            print(f"🔍 TENANT VALIDATION: Validating tenant for user {owner_id}")
+            await safe_push(batch, "tenant_validation", {
+                "file": path, "stage": "tenant_validation", "progress": 2,
+                "message": "🔍 Validating tenant access..."
+            })
+            
+            # Validate tenant exists before processing
+            validate_tenant_before_processing(owner_id)
+            
+            print(f"✅ TENANT VALIDATION: Passed for user {owner_id}")
+            await safe_push(batch, "tenant_validated", {
+                "file": path, "stage": "tenant_validated", "progress": 3,
+                "message": "✅ Tenant validation successful"
+            })
+            
+        except TenantValidationError as e:
+            print(f"❌ TENANT VALIDATION FAILED: {e}")
+            await push_high_priority(batch, "error", {
+                "file": path, "error": str(e),
+                "message": f"Tenant validation failed: {str(e)}",
+                "error_type": "tenant_validation_error",
+                "user_id": owner_id
+            })
+            raise Exception(f"Tenant validation failed: {e}")
+        
         # STAGE 1: Ultra-Fast Text Extraction
         task_progress["extraction"]["start_time"] = time.time()
         await push_high_priority(batch, "processing", {
@@ -957,7 +986,7 @@ async def lightning_process_file(owner_id: str, batch: str, path: str, provider:
         })
         await update_overall_progress()
         
-        # STAGE 6: DATABASE STORAGE
+        # STAGE 6: DATABASE STORAGE WITH FILE METADATA
         db_start = time.time()
         
         with Session(engine) as sess:
@@ -973,11 +1002,39 @@ async def lightning_process_file(owner_id: str, batch: str, path: str, provider:
                 # Use the filename as is
                 original_filename = path_filename
 
+            # Get file size from the actual file before it's cleaned up
+            file_size = 0
+            content_type = None
+            try:
+                if os.path.exists(path):
+                    file_size = os.path.getsize(path)
+                    # Determine content type from file extension
+                    file_ext = Path(original_filename).suffix.lower()
+                    content_type = "application/pdf" if file_ext == ".pdf" else \
+                                  "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if file_ext == ".docx" else \
+                                  "text/plain" if file_ext == ".txt" else \
+                                  "application/rtf" if file_ext == ".rtf" else \
+                                  "application/octet-stream"
+                    print(f"📊 File metadata captured: {original_filename} = {file_size} bytes ({content_type})")
+                else:
+                    print(f"⚠️ Warning: File not found at path {path} during database storage")
+            except Exception as e:
+                print(f"❌ Error getting file metadata for {path}: {e}")
+
+            # Try to get S3 metadata if available (check if path contains S3 info)
+            s3_key = None
+            s3_bucket = None
+            # S3 info might be available in processing context - we'll add this later
+            
             doc = Document(
                 owner_id=owner_id, 
                 tenant_id=user_tenant_id,  # Use tenant_id obtained earlier
                 path=path, 
-                filename=original_filename, 
+                filename=original_filename,
+                file_size=file_size,  # Store actual file size
+                content_type=content_type,  # Store MIME type
+                s3_key=s3_key,  # Store S3 key if available
+                s3_bucket=s3_bucket,  # Store S3 bucket if available
                 tags=tags,
                 demo_tags=demos, 
                 summary=summary, 

@@ -2,6 +2,8 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react'
 import { AuthLoadingManager, AuthLoadingState } from './auth-loading-state'
+import { userSessionManager } from './user-session-manager'
+import { vaultLoadingManager } from './vault-loading-manager'
 
 interface User {
   id: number
@@ -77,28 +79,52 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const authOperationRef = useRef<AbortController | null>(null)
   const cleanupTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
-  // Function to set auth cookie
+  // Function to set auth cookie with enhanced debugging
   const setAuthCookie = (token: string) => {
     if (typeof window === 'undefined') return
     
-    console.log('Setting auth cookie with token:', token.substring(0, 20) + '...')
+    console.log('🍪 AUTH: Setting auth cookie with token:', token.substring(0, 20) + '...')
+    console.log('🍪 AUTH: Token length:', token.length)
+    console.log('🍪 AUTH: Current domain:', window.location.hostname)
+    console.log('🍪 AUTH: Current protocol:', window.location.protocol)
+    
+    // Clear any existing auth token first
+    document.cookie = 'auth-token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT'
     
     // Use secure cookie settings for production, lax for development
     const isProduction = window.location.protocol === 'https:'
+    const cookieString = isProduction 
+      ? `auth-token=${encodeURIComponent(token)}; path=/; max-age=604800; samesite=lax; secure`
+      : `auth-token=${encodeURIComponent(token)}; path=/; max-age=604800; samesite=lax`
+    
+    console.log('🍪 AUTH: Cookie string:', cookieString.substring(0, 100) + '...')
+    document.cookie = cookieString
+    
     if (isProduction) {
-      document.cookie = `auth-token=${token}; path=/; max-age=604800; samesite=lax; secure`
-      console.log('Auth cookie set for production environment')
+      console.log('🍪 AUTH: Auth cookie set for production environment')
     } else {
-      document.cookie = `auth-token=${token}; path=/; max-age=604800; samesite=lax`
-      console.log('Auth cookie set for development environment')
+      console.log('🍪 AUTH: Auth cookie set for development environment')
     }
     
-    // Verify cookie was set
-    const cookieCheck = getAuthCookie()
+    // Verify cookie was set with multiple attempts
+    let cookieCheck = getAuthCookie()
+    let attempts = 0
+    const maxAttempts = 3
+    
+    while (!cookieCheck && attempts < maxAttempts) {
+      attempts++
+      console.log(`🍪 AUTH: Cookie verification attempt ${attempts}/${maxAttempts}`)
+      setTimeout(() => {
+        cookieCheck = getAuthCookie()
+      }, 100 * attempts) // Progressive delay
+    }
+    
     if (cookieCheck) {
-      console.log('Auth cookie set successfully')
+      console.log('✅ AUTH: Auth cookie set and verified successfully')
+      console.log('🍪 AUTH: Verified token preview:', cookieCheck.substring(0, 20) + '...')
     } else {
-      console.warn('Auth cookie not immediately available')
+      console.error('❌ AUTH: Auth cookie not available after setting')
+      console.log('🍪 AUTH: All cookies after setting:', document.cookie)
     }
   }
 
@@ -114,9 +140,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return document.cookie.split('; ').find(row => row.startsWith('auth-token='))?.split('=')[1]
   }
 
-  // Clear all auth state function - stable version with no dependencies
+  // Clear all auth state function with complete session isolation
   const clearAuthState = useCallback(() => {
-    console.log('Clearing all auth state')
+    console.log('🧹 AuthContext: Clearing all auth state with complete session isolation')
     
     // Cancel any ongoing operations
     if (authOperationRef.current) {
@@ -130,13 +156,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       cleanupTimeoutRef.current = null
     }
     
-    // Clear storage (with browser checks)
-    removeAuthCookie()
-    if (typeof window !== 'undefined') {
-      sessionStorage.clear()
-      localStorage.removeItem(AUTH_STATE_KEY)
-      localStorage.removeItem('auth-state')
-    }
+    // Use session manager for complete cleanup
+    userSessionManager.clearCurrentSession({
+      clearAllCaches: true,
+      clearLocalStorage: true,
+      clearSessionStorage: true,
+      clearIndexedDB: true,
+      clearCookies: true
+    })
     
     // Generate new session ID for complete isolation
     const newSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
@@ -153,6 +180,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Reset loading manager
     loadingManagerRef.current.reset()
     setLoadingState(null)
+    
+    console.log('✅ AuthContext: Complete auth state cleared with session isolation')
   }, []) // No dependencies to prevent infinite loops
 
   // Force refresh function - stable version
@@ -312,10 +341,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           lastStateChange: Date.now()
         }));
         
-        // Only redirect if we're on a protected route
-        const protectedRoutes = ['/vault', '/upload', '/documents', '/admin']
-        if (protectedRoutes.some(route => window.location.pathname.startsWith(route))) {
-          window.location.href = '/login';
+        // Only redirect if we're on a protected route and in browser
+        if (typeof window !== 'undefined') {
+          const protectedRoutes = ['/vault', '/upload', '/documents', '/admin']
+          if (protectedRoutes.some(route => window.location.pathname.startsWith(route))) {
+            window.location.href = '/login';
+          }
         }
       } finally {
         setState(prev => ({
@@ -468,6 +499,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Store token in cookie immediately
       setAuthCookie(data.access_token)
       
+      // Small delay to ensure cookie is properly set before making subsequent requests
+      await new Promise(resolve => setTimeout(resolve, 100))
+      
+      // Initialize new user session with complete isolation, preserving the auth token
+      const userSession = userSessionManager.initializeSession(
+        data.user.id.toString(),
+        data.user.email,
+        true // Preserve auth token that was just set
+      )
+      
       // Set the user data and authenticated state atomically
       setState({
         user: data.user,
@@ -475,13 +516,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         authError: null,
         isLoading: false,
         lastStateChange: Date.now(),
-        sessionId: `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+        sessionId: userSession.sessionId
       })
+      
+      // Start the vault loading process immediately after successful login
+      console.log('🚀 AuthContext: Starting vault initialization loading sequence')
+      vaultLoadingManager.startAuthentication()
+      
+      // Complete authentication step quickly since login is done
+      setTimeout(() => {
+        vaultLoadingManager.completeAuthentication()
+      }, 500)
       
       // Clear the operation ref since we're done
       authOperationRef.current = null
       
-      console.log('AuthContext: Login successful, auth state updated')
+      console.log('✅ AuthContext: Login successful with isolated user session:', userSession.sessionId)
       return true
       
     } catch (error) {
@@ -524,33 +574,48 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const register = async (userData: RegisterData) => {
     try {
+      console.log('AuthContext: Starting registration process for:', userData.email)
+      
       let response: Response
       
       try {
+        console.log('AuthContext: Making registration request to:', `${apiUrl}/auth/register`)
         response = await fetch(`${apiUrl}/auth/register`, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
           },
-          body: JSON.stringify(userData)
+          body: JSON.stringify(userData),
+          mode: 'cors'
         })
+        console.log('AuthContext: Registration response received, status:', response.status, 'ok:', response.ok)
       } catch (fetchError: any) {
-        // Handle actual network errors
+        console.error('AuthContext: Registration fetch error:', fetchError)
+        
+        // Handle actual network errors only
         if (fetchError.name === 'TypeError' && 
             (fetchError.message.includes('Failed to fetch') || 
              fetchError.message.includes('Network request failed') ||
-             fetchError.message.includes('fetch is not defined'))) {
+             fetchError.message.includes('fetch is not defined') ||
+             fetchError.message.includes('NetworkError') ||
+             fetchError.message.includes('ERR_NETWORK'))) {
           throw new Error('Network connection failed. Please check your internet connection and try again.')
         }
-        throw new Error(`Connection failed: ${fetchError.message}`)
+        
+        // For other fetch errors, be more specific
+        throw new Error(`Registration request failed: ${fetchError.message}`)
       }
 
       if (!response.ok) {
+        console.log('AuthContext: Registration failed with status:', response.status)
         let errorMessage = 'Registration failed'
         try {
           const errorData = await response.json()
           errorMessage = errorData.detail || errorMessage
-        } catch {
+          console.log('AuthContext: Registration error details:', errorData)
+        } catch (parseError) {
+          console.error('AuthContext: Failed to parse error response:', parseError)
           // If response is not JSON, use status-based message
           if (response.status === 409) {
             errorMessage = 'Email already exists'
@@ -563,20 +628,49 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         throw new Error(errorMessage)
       }
 
-      const data = await response.json()
+      let data
+      try {
+        const responseText = await response.text()
+        console.log('AuthContext: Registration response text length:', responseText.length)
+        
+        if (!responseText.trim()) {
+          throw new Error('Empty response from server')
+        }
+        
+        data = JSON.parse(responseText)
+        console.log('AuthContext: Registration response parsed successfully:', data)
+      } catch (parseError) {
+        console.error('AuthContext: Failed to parse registration response:', parseError)
+        throw new Error('Invalid response from server. Please try again.')
+      }
+
+      // Validate response structure
+      if (!data.email) {
+        console.error('AuthContext: No email in registration response:', data)
+        throw new Error('Invalid registration response - missing email')
+      }
+
+      console.log('AuthContext: Registration successful for:', data.email)
       return {
         email: data.email,
         verificationCode: data.verification_code || null
       }
     } catch (error) {
-      console.error('Registration error:', error)
-      throw error
+      console.error('AuthContext: Registration error:', error)
+      
+      // Don't re-wrap errors that are already properly formatted
+      if (error instanceof Error) {
+        throw error
+      } else {
+        throw new Error('Registration failed. Please try again.')
+      }
     }
   }
 
   const logout = async () => {
     const currentSessionId = state.sessionId
-    console.log('Starting logout for session:', currentSessionId)
+    const currentUser = state.user
+    console.log('🚪 AuthContext: Starting logout with complete session isolation for:', currentUser?.email)
     
     try {
       // Cancel any ongoing auth operations immediately
@@ -594,13 +688,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Get the current token before clearing
       const token = getAuthCookie()
       
-      // Immediately clear local state to prevent UI confusion
-      removeAuthCookie()
-      if (typeof window !== 'undefined') {
-        sessionStorage.clear()
-        localStorage.removeItem('auth-state')
-        localStorage.removeItem(AUTH_STATE_KEY)
-      }
+      // Use session manager for complete session cleanup
+      userSessionManager.clearCurrentSession({
+        clearAllCaches: true,
+        clearLocalStorage: true,
+        clearSessionStorage: true,
+        clearIndexedDB: true,
+        clearCookies: true
+      })
       
       // Generate new session ID for complete isolation
       const newSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
@@ -628,30 +723,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             signal: logoutController.signal
           }).then(() => {
             clearTimeout(logoutTimeout)
+            console.log('✅ AuthContext: Backend logout successful')
           }).catch(error => {
             clearTimeout(logoutTimeout)
-            console.warn('Backend logout failed (non-blocking):', error)
+            console.warn('⚠️ AuthContext: Backend logout failed (non-blocking):', error)
           })
         } catch (error) {
-          console.warn('Backend logout setup failed (non-blocking):', error)
+          console.warn('⚠️ AuthContext: Backend logout setup failed (non-blocking):', error)
         }
       }
 
-      console.log('Logout completed for session:', currentSessionId, 'new session:', newSessionId)
+      console.log('✅ AuthContext: Logout completed with session isolation')
+      console.log('   - Previous session:', currentSessionId)
+      console.log('   - New session:', newSessionId)
+      console.log('   - User cache cleared for:', currentUser?.email)
       
       // Use replace to avoid middleware redirect and ensure clean navigation
       window.location.replace('/')
       
     } catch (error) {
-      console.error('Logout error for session:', currentSessionId, error)
+      console.error('❌ AuthContext: Logout error for session:', currentSessionId, error)
       
-      // Force complete cleanup even on error
-      removeAuthCookie()
-      if (typeof window !== 'undefined') {
-        sessionStorage.clear()
-        localStorage.removeItem('auth-state')
-        localStorage.removeItem(AUTH_STATE_KEY)
-      }
+      // Force complete cleanup even on error using session manager
+      userSessionManager.forceCompleteCleanup()
       
       const newSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
       

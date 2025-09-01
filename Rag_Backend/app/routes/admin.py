@@ -1,46 +1,74 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlmodel import Session, select, func
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
+from sqlmodel import Session, select, func, and_, or_
 from typing import List, Optional
 from app.database import get_session, User, UserToken
 from app.models import Document, AICuration, AISummary, ProcessingDocument
-from app.deps import get_current_user
+from app.models_document_access import DocumentAccess, DocumentAccessLog
+from app.deps import get_current_admin_user, get_current_tenant_id_dependency
 from app.auth.models import UserCreate, UserResponse, AdminUserCreate
 from app.auth.jwt_handler import get_password_hash
+from app.services.document_access_service import DocumentAccessService
 from datetime import datetime, timedelta
 import uuid
 import os
 from pathlib import Path
 from pydantic import BaseModel
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+class UserCreateWithDocuments(BaseModel):
+    first_name: str
+    last_name: str
+    email: str
+    username: Optional[str] = None
+    password: str
+    role: str = "user"
+    company: Optional[str] = None
+    company_id: Optional[str] = None
+    is_admin: bool = False
+    is_active: bool = True
+    assigned_document_ids: List[str] = []
+    document_permissions: List[str] = ["read"]
 
-def verify_admin_access(current_user: User = Depends(get_current_user)):
-    """Verify that the current user has admin access"""
-    if not current_user.is_admin or current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required"
-        )
-    return current_user
+class DocumentAssignmentRequest(BaseModel):
+    user_ids: List[str]
+    permissions: List[str] = ["read"]
+
+router = APIRouter(prefix="/admin", tags=["admin"])
 
 @router.get("/users", response_model=List[dict])
 async def get_all_users(
-    admin_user: User = Depends(verify_admin_access),
+    request: Request,
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000)
 ):
     """Get all users within the same tenant (admin only)"""
     
-    # Only get users from the same tenant
-    statement = select(User).where(User.tenant_id == admin_user.tenant_id).offset(skip).limit(limit)
+    # Only get users from the same tenant using tenant context
+    statement = select(User).where(User.tenant_id == tenant_id).offset(skip).limit(limit)
     users = session.exec(statement).all()
     
     result = []
     for user in users:
-        # Count documents for this user
-        doc_count_statement = select(func.count(Document.id)).where(Document.owner_id == str(user.id))
-        doc_count = session.exec(doc_count_statement).first() or 0
+        # Count documents owned by this user
+        owned_docs_count = session.exec(
+            select(func.count(Document.id)).where(Document.owner_id == str(user.id))
+        ).first() or 0
+        
+        # Count documents assigned to this user (excluding owned documents)
+        assigned_docs_count = session.exec(
+            select(func.count(DocumentAccess.id)).where(
+                and_(
+                    DocumentAccess.user_id == str(user.id),
+                    DocumentAccess.tenant_id == tenant_id,
+                    DocumentAccess.is_active == True
+                )
+            )
+        ).first() or 0
+        
+        # Total document count = owned + assigned
+        total_doc_count = owned_docs_count + assigned_docs_count
         
         # Get last login info
         last_login = user.last_login.strftime("%Y-%m-%d %H:%M:%S") if user.last_login else "Never"
@@ -52,7 +80,7 @@ async def get_all_users(
             "role": user.role,
             "status": "active" if user.verified else "inactive",
             "lastLogin": last_login,
-            "documentsCount": doc_count,
+            "documentsCount": total_doc_count,
             "company": user.company,
             "verified": user.verified,
             "created_at": user.created_at.strftime("%Y-%m-%d %H:%M:%S"),
@@ -62,29 +90,242 @@ async def get_all_users(
     
     return result
 
+# Document Assignment Endpoints
+
+@router.post("/documents/{document_id}/assign", response_model=dict)
+async def assign_document_to_users(
+    request: Request,
+    document_id: str,
+    assignment_data: DocumentAssignmentRequest,
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
+    session: Session = Depends(get_session)
+):
+    """Assign a document to multiple users (admin only)"""
+    
+    # Verify document exists and belongs to tenant
+    document = session.exec(
+        select(Document, User).join(User, Document.owner_id == User.id).where(
+            and_(
+                Document.id == document_id,
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
+    
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found in this tenant"
+        )
+    
+    doc, owner = document
+    assigned_users = []
+    failed_assignments = []
+    
+    for user_id in assignment_data.user_ids:
+        success = DocumentAccessService.assign_document_to_user(
+            db=session,
+            admin_user_id=admin_user.id,
+            document_id=document_id,
+            target_user_id=user_id,
+            tenant_id=tenant_id,
+            permissions=assignment_data.permissions
+        )
+        
+        if success:
+            assigned_users.append(user_id)
+        else:
+            failed_assignments.append(user_id)
+    
+    return {
+        "message": f"Document '{doc.filename}' assignment completed",
+        "document_id": document_id,
+        "assigned_users": assigned_users,
+        "failed_assignments": failed_assignments,
+        "permissions": assignment_data.permissions
+    }
+
+@router.delete("/documents/{document_id}/assign/{user_id}", response_model=dict)
+async def remove_document_assignment(
+    request: Request,
+    document_id: str,
+    user_id: str,
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
+    session: Session = Depends(get_session)
+):
+    """Remove document assignment from a user (admin only)"""
+    
+    success = DocumentAccessService.remove_document_assignment(
+        db=session,
+        admin_user_id=admin_user.id,
+        document_id=document_id,
+        target_user_id=user_id,
+        tenant_id=tenant_id
+    )
+    
+    if success:
+        return {
+            "message": "Document assignment removed successfully",
+            "document_id": document_id,
+            "user_id": user_id
+        }
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document assignment not found"
+        )
+
+@router.get("/documents/{document_id}/assignments", response_model=List[dict])
+async def get_document_assignments(
+    request: Request,
+    document_id: str,
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
+    session: Session = Depends(get_session)
+):
+    """Get all user assignments for a document (admin only)"""
+    
+    assignments = DocumentAccessService.get_document_assignments(
+        db=session,
+        admin_user_id=admin_user.id,
+        document_id=document_id,
+        tenant_id=tenant_id
+    )
+    
+    return assignments
+
+@router.post("/users/create-with-documents", response_model=dict)
+async def create_user_with_document_access(
+    request: Request,
+    user_data: UserCreateWithDocuments,
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
+    session: Session = Depends(get_session)
+):
+    """Create a new user and assign documents (admin only)"""
+    
+    # Check if user already exists by email within the tenant
+    existing_user = session.exec(
+        select(User).where(
+            and_(
+                User.email == user_data.email.lower(),
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User with this email already exists in this tenant"
+        )
+    
+    # Validate password strength
+    if len(user_data.password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters long"
+        )
+    
+    # Set admin flags based on role
+    is_admin = user_data.role == "admin" or user_data.is_admin
+    
+    # Create new user within the same tenant
+    hashed_password = get_password_hash(user_data.password)
+    new_user = User(
+        email=user_data.email.lower(),
+        username=user_data.username,
+        password_hash=hashed_password,
+        first_name=user_data.first_name,
+        last_name=user_data.last_name,
+        company=user_data.company or admin_user.company,
+        company_id=user_data.company_id or admin_user.company_id,
+        tenant_id=tenant_id,
+        primary_tenant_id=tenant_id,
+        verified=True,
+        role=user_data.role,
+        is_admin=is_admin,
+        is_active=user_data.is_active,
+        created_by=admin_user.id,
+        created_at=datetime.utcnow()
+    )
+    
+    session.add(new_user)
+    session.commit()
+    session.refresh(new_user)
+    
+    # Assign documents if provided and user is not admin
+    assigned_documents = []
+    failed_assignments = []
+    
+    if user_data.assigned_document_ids and not is_admin:
+        for doc_id in user_data.assigned_document_ids:
+            success = DocumentAccessService.assign_document_to_user(
+                db=session,
+                admin_user_id=admin_user.id,
+                document_id=doc_id,
+                target_user_id=new_user.id,
+                tenant_id=tenant_id,
+                permissions=user_data.document_permissions
+            )
+            
+            if success:
+                assigned_documents.append(doc_id)
+            else:
+                failed_assignments.append(doc_id)
+    
+    return {
+        "message": "User created successfully",
+        "user_id": new_user.id,
+        "email": new_user.email,
+        "username": new_user.username,
+        "role": new_user.role,
+        "is_admin": new_user.is_admin,
+        "assigned_documents": assigned_documents,
+        "failed_document_assignments": failed_assignments,
+        "document_permissions": user_data.document_permissions if not is_admin else []
+    }
+
 @router.post("/users", response_model=dict)
 async def create_user(
+    request: Request,
     user_data: AdminUserCreate,
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Create a new user (admin only)"""
     
-    # Check if user already exists by email
-    existing_user = session.exec(select(User).where(User.email == user_data.email.lower())).first()
+    # Check if user already exists by email within the tenant
+    existing_user = session.exec(
+        select(User).where(
+            and_(
+                User.email == user_data.email.lower(),
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User with this email already exists"
+            detail="User with this email already exists in this tenant"
         )
     
-    # Check if username is provided and unique
+    # Check if username is provided and unique within tenant
     if user_data.username:
-        existing_username = session.exec(select(User).where(User.username == user_data.username)).first()
+        existing_username = session.exec(
+            select(User).where(
+                and_(
+                    User.username == user_data.username,
+                    User.tenant_id == tenant_id
+                )
+            )
+        ).first()
         if existing_username:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Username already exists"
+                detail="Username already exists in this tenant"
             )
     
     # Validate password strength
@@ -107,7 +348,8 @@ async def create_user(
         last_name=user_data.last_name,
         company=user_data.company or admin_user.company,  # Inherit admin's company if not specified
         company_id=user_data.company_id or admin_user.company_id,
-        tenant_id=admin_user.tenant_id,  # Assign to same tenant as admin
+        tenant_id=tenant_id,  # Assign to current tenant
+        primary_tenant_id=tenant_id,  # Set as primary tenant
         verified=True,  # Admin-created users are automatically verified
         role=user_data.role,
         is_admin=is_admin,
@@ -131,19 +373,28 @@ async def create_user(
 
 @router.put("/users/{user_id}", response_model=dict)
 async def update_user(
+    request: Request,
     user_id: str,
     user_data: dict,
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Update user information (admin only)"""
     
-    # Find user
-    user = session.exec(select(User).where(User.id == user_id)).first()
+    # Find user within the same tenant
+    user = session.exec(
+        select(User).where(
+            and_(
+                User.id == user_id,
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            detail="User not found in this tenant"
         )
     
     # Update allowed fields
@@ -180,18 +431,27 @@ async def update_user(
 
 @router.delete("/users/{user_id}", response_model=dict)
 async def delete_user(
+    request: Request,
     user_id: str,
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Delete a user and all their data (admin only)"""
     
-    # Find user
-    user = session.exec(select(User).where(User.id == user_id)).first()
+    # Find user within the same tenant
+    user = session.exec(
+        select(User).where(
+            and_(
+                User.id == user_id,
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            detail="User not found in this tenant"
         )
     
     # Prevent admin from deleting themselves
@@ -204,130 +464,230 @@ async def delete_user(
     # Import additional models for complete cleanup
     from app.models import (
         CurationSettings, DocumentCurationMapping, CurationGenerationHistory,
-        SummarySettings, DocumentSummaryMapping, SummaryGenerationHistory
+        SummarySettings, DocumentSummaryMapping, SummaryGenerationHistory,
+        Conversation, Message, ConversationSettings
     )
+    from app.models_document_access import DocumentAccess, UserDocumentGroup, DocumentAccessLog
     
-    # Delete user's documents and files
-    user_documents = session.exec(select(Document).where(Document.owner_id == user_id)).all()
-    deleted_files = 0
-    
-    for doc in user_documents:
-        # Delete physical file
-        if os.path.exists(doc.path):
-            try:
-                os.remove(doc.path)
-                deleted_files += 1
-            except Exception as e:
-                print(f"Failed to delete file {doc.path}: {e}")
+    try:
+        # Step 1: Delete all user tokens first (this is causing the foreign key constraint error)
+        tokens = session.exec(select(UserToken).where(UserToken.user_id == user_id)).all()
+        for token in tokens:
+            session.delete(token)
+        session.flush()  # Ensure tokens are deleted before proceeding
         
-        # Delete from database
-        session.delete(doc)
-    
-    # Delete user's processing documents
-    processing_docs = session.exec(select(ProcessingDocument).where(ProcessingDocument.owner_id == user_id)).all()
-    for proc_doc in processing_docs:
-        session.delete(proc_doc)
-    
-    # Delete user's AI curations
-    curations = session.exec(select(AICuration).where(AICuration.owner_id == user_id)).all()
-    for curation in curations:
-        session.delete(curation)
-    
-    # Delete user's AI summaries
-    summaries = session.exec(select(AISummary).where(AISummary.owner_id == user_id)).all()
-    for summary in summaries:
-        session.delete(summary)
-    
-    # Delete user's curation settings
-    curation_settings = session.exec(select(CurationSettings).where(CurationSettings.owner_id == user_id)).all()
-    for setting in curation_settings:
-        session.delete(setting)
-    
-    # Delete user's summary settings
-    summary_settings = session.exec(select(SummarySettings).where(SummarySettings.owner_id == user_id)).all()
-    for setting in summary_settings:
-        session.delete(setting)
-    
-    # Delete user's document curation mappings
-    doc_curation_mappings = session.exec(select(DocumentCurationMapping).where(DocumentCurationMapping.owner_id == user_id)).all()
-    for mapping in doc_curation_mappings:
-        session.delete(mapping)
-    
-    # Delete user's document summary mappings
-    doc_summary_mappings = session.exec(select(DocumentSummaryMapping).where(DocumentSummaryMapping.owner_id == user_id)).all()
-    for mapping in doc_summary_mappings:
-        session.delete(mapping)
-    
-    # Delete user's curation generation history
-    curation_history = session.exec(select(CurationGenerationHistory).where(CurationGenerationHistory.owner_id == user_id)).all()
-    for history in curation_history:
-        session.delete(history)
-    
-    # Delete user's summary generation history
-    summary_history = session.exec(select(SummaryGenerationHistory).where(SummaryGenerationHistory.owner_id == user_id)).all()
-    for history in summary_history:
-        session.delete(history)
-    
-    # Delete user's tokens
-    tokens = session.exec(select(UserToken).where(UserToken.user_id == user_id)).all()
-    for token in tokens:
-        session.delete(token)
-    
-    # Delete the user
-    session.delete(user)
-    session.commit()
-    
-    return {
-        "message": "User and all associated data deleted successfully",
-        "user_id": user_id,
-        "deleted_documents": len(user_documents),
-        "deleted_files": deleted_files,
-        "deleted_curations": len(curations),
-        "deleted_summaries": len(summaries),
-        "deleted_curation_settings": len(curation_settings),
-        "deleted_summary_settings": len(summary_settings),
-        "deleted_curation_mappings": len(doc_curation_mappings),
-        "deleted_summary_mappings": len(doc_summary_mappings),
-        "deleted_curation_history": len(curation_history),
-        "deleted_summary_history": len(summary_history),
-        "deleted_tokens": len(tokens)
-    }
+        # Step 2: Delete document access logs
+        access_logs = session.exec(select(DocumentAccessLog).where(DocumentAccessLog.user_id == user_id)).all()
+        for log in access_logs:
+            session.delete(log)
+        
+        # Step 3: Delete document access records
+        doc_access_records = session.exec(select(DocumentAccess).where(DocumentAccess.user_id == user_id)).all()
+        for access in doc_access_records:
+            session.delete(access)
+        
+        # Step 4: Delete document access records where user was the assigner
+        assigned_access_records = session.exec(select(DocumentAccess).where(DocumentAccess.assigned_by == user_id)).all()
+        for access in assigned_access_records:
+            session.delete(access)
+        
+        # Step 5: Update user document groups to remove this user
+        user_groups = session.exec(select(UserDocumentGroup)).all()
+        for group in user_groups:
+            if user_id in group.user_ids:
+                group.user_ids.remove(user_id)
+                session.add(group)
+        
+        # Step 6: Delete user document groups created by this user
+        created_groups = session.exec(select(UserDocumentGroup).where(UserDocumentGroup.created_by == user_id)).all()
+        for group in created_groups:
+            session.delete(group)
+        
+        # Step 7: Delete conversation messages
+        user_conversations = session.exec(select(Conversation).where(Conversation.owner_id == user_id)).all()
+        for conversation in user_conversations:
+            # Delete messages in this conversation
+            messages = session.exec(select(Message).where(Message.conversation_id == conversation.id)).all()
+            for message in messages:
+                session.delete(message)
+            # Delete the conversation
+            session.delete(conversation)
+        
+        # Step 8: Delete conversation settings
+        conv_settings = session.exec(select(ConversationSettings).where(ConversationSettings.owner_id == user_id)).all()
+        for setting in conv_settings:
+            session.delete(setting)
+        
+        # Step 9: Delete user's document curation mappings
+        doc_curation_mappings = session.exec(select(DocumentCurationMapping).where(DocumentCurationMapping.owner_id == user_id)).all()
+        for mapping in doc_curation_mappings:
+            session.delete(mapping)
+        
+        # Step 10: Delete user's document summary mappings
+        doc_summary_mappings = session.exec(select(DocumentSummaryMapping).where(DocumentSummaryMapping.owner_id == user_id)).all()
+        for mapping in doc_summary_mappings:
+            session.delete(mapping)
+        
+        # Step 11: Delete user's curation generation history
+        curation_history = session.exec(select(CurationGenerationHistory).where(CurationGenerationHistory.owner_id == user_id)).all()
+        for history in curation_history:
+            session.delete(history)
+        
+        # Step 12: Delete user's summary generation history
+        summary_history = session.exec(select(SummaryGenerationHistory).where(SummaryGenerationHistory.owner_id == user_id)).all()
+        for history in summary_history:
+            session.delete(history)
+        
+        # Step 13: Delete user's AI curations
+        curations = session.exec(select(AICuration).where(AICuration.owner_id == user_id)).all()
+        for curation in curations:
+            session.delete(curation)
+        
+        # Step 14: Delete user's AI summaries
+        summaries = session.exec(select(AISummary).where(AISummary.owner_id == user_id)).all()
+        for summary in summaries:
+            session.delete(summary)
+        
+        # Step 15: Delete user's curation settings
+        curation_settings = session.exec(select(CurationSettings).where(CurationSettings.owner_id == user_id)).all()
+        for setting in curation_settings:
+            session.delete(setting)
+        
+        # Step 16: Delete user's summary settings
+        summary_settings = session.exec(select(SummarySettings).where(SummarySettings.owner_id == user_id)).all()
+        for setting in summary_settings:
+            session.delete(setting)
+        
+        # Step 17: Delete user's processing documents
+        processing_docs = session.exec(select(ProcessingDocument).where(ProcessingDocument.owner_id == user_id)).all()
+        for proc_doc in processing_docs:
+            session.delete(proc_doc)
+        
+        # Step 18: Delete user's documents and files
+        user_documents = session.exec(select(Document).where(Document.owner_id == user_id)).all()
+        deleted_files = 0
+        
+        for doc in user_documents:
+            # Delete physical file
+            if os.path.exists(doc.path):
+                try:
+                    os.remove(doc.path)
+                    deleted_files += 1
+                except Exception as e:
+                    print(f"Failed to delete file {doc.path}: {e}")
+            
+            # Delete from database
+            session.delete(doc)
+        
+        # Step 19: Finally, delete the user
+        session.delete(user)
+        
+        # Commit all changes
+        session.commit()
+        
+        return {
+            "message": "User and all associated data deleted successfully",
+            "user_id": user_id,
+            "deleted_documents": len(user_documents),
+            "deleted_files": deleted_files,
+            "deleted_curations": len(curations),
+            "deleted_summaries": len(summaries),
+            "deleted_curation_settings": len(curation_settings),
+            "deleted_summary_settings": len(summary_settings),
+            "deleted_curation_mappings": len(doc_curation_mappings),
+            "deleted_summary_mappings": len(doc_summary_mappings),
+            "deleted_curation_history": len(curation_history),
+            "deleted_summary_history": len(summary_history),
+            "deleted_conversations": len(user_conversations),
+            "deleted_conversation_messages": sum(len(session.exec(select(Message).where(Message.conversation_id == conv.id)).all()) for conv in user_conversations),
+            "deleted_tokens": len(tokens),
+            "deleted_access_records": len(doc_access_records),
+            "deleted_access_logs": len(access_logs)
+        }
+        
+    except Exception as e:
+        session.rollback()
+        print(f"Error during user deletion: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user: {str(e)}"
+        )
 
 @router.get("/documents", response_model=List[dict])
 async def get_all_documents(
-    admin_user: User = Depends(verify_admin_access),
+    request: Request,
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session),
     user_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000)
 ):
-    """Get all documents within the same tenant (admin only)"""
+    """Get all documents within the current tenant"""
     
-    # Build query with tenant filtering
-    statement = select(Document, User).join(User, Document.owner_id == User.id).where(
-        User.tenant_id == admin_user.tenant_id
-    )
+    print(f"🔍 ADMIN DOCS: Getting documents for tenant {tenant_id}")
+    print(f"🔍 ADMIN DOCS: Admin user: {admin_user.email}")
+    print(f"🔍 ADMIN DOCS: Specific user filter: {user_id}")
     
+    # Get tenant users first
+    tenant_user_ids = session.exec(select(User.id).where(User.tenant_id == tenant_id)).all()
+    print(f"🔍 ADMIN DOCS: Found {len(tenant_user_ids)} users in tenant {tenant_id}")
+    
+    if not tenant_user_ids:
+        print(f"⚠️ ADMIN DOCS: No users found in tenant {tenant_id}")
+        return []
+    
+    # Build query for documents owned by users in the current tenant
     if user_id:
-        statement = statement.where(Document.owner_id == user_id)
+        # If specific user requested, filter by that user (but ensure they're in the tenant)
+        if user_id not in tenant_user_ids:
+            print(f"⚠️ ADMIN DOCS: User {user_id} not in tenant {tenant_id}")
+            return []
+        statement = select(Document, User).join(User, Document.owner_id == User.id).where(
+            and_(
+                Document.owner_id == user_id,
+                User.tenant_id == tenant_id
+            )
+        )
+    else:
+        # Show all documents from users in the current tenant
+        statement = select(Document, User).join(User, Document.owner_id == User.id).where(
+            and_(
+                Document.owner_id.in_(tenant_user_ids),
+                User.tenant_id == tenant_id
+            )
+        )
     
     statement = statement.offset(skip).limit(limit)
     results = session.exec(statement).all()
     
+    print(f"🔍 ADMIN DOCS: Found {len(results)} documents")
+    
     documents = []
     for doc, user in results:
-        # Get file size if file exists
-        file_size = 0
-        if os.path.exists(doc.path):
-            file_size = os.path.getsize(doc.path)
+        # Use stored file size from database, fallback to file system check if needed
+        file_size = doc.file_size if hasattr(doc, 'file_size') and doc.file_size else 0
         
-        # Determine file type from extension
-        file_ext = Path(doc.filename).suffix.lower()
-        file_type = "application/pdf" if file_ext == ".pdf" else \
-                   "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if file_ext == ".docx" else \
-                   "text/plain" if file_ext == ".txt" else \
-                   "application/rtf" if file_ext == ".rtf" else \
-                   "application/octet-stream"
+        # If no stored file size, try to get it from file system (for backward compatibility)
+        if file_size == 0 and os.path.exists(doc.path):
+            try:
+                file_size = os.path.getsize(doc.path)
+                print(f"📊 Admin: Fallback file size calculation for {doc.filename}: {file_size} bytes")
+            except Exception as e:
+                print(f"❌ Admin: Error getting file size for {doc.path}: {e}")
+                file_size = 0
+        
+        # Use stored content type or determine from extension
+        file_type = doc.content_type if hasattr(doc, 'content_type') and doc.content_type else None
+        
+        if not file_type:
+            # Fallback to extension-based detection
+            file_ext = Path(doc.filename).suffix.lower()
+            file_type = "application/pdf" if file_ext == ".pdf" else \
+                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if file_ext == ".docx" else \
+                       "text/plain" if file_ext == ".txt" else \
+                       "application/rtf" if file_ext == ".rtf" else \
+                       "application/octet-stream"
         
         documents.append({
             "id": doc.id,
@@ -349,41 +709,63 @@ async def get_all_documents(
             "path": doc.path
         })
     
+    print(f"✅ ADMIN DOCS: Returning {len(documents)} documents")
     return documents
 
 @router.delete("/documents/{document_id}", response_model=dict)
 async def delete_document(
+    request: Request,
     document_id: str,
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Delete a specific document and its associated data (admin only)"""
     
-    # Find document
-    document = session.exec(select(Document).where(Document.id == document_id)).first()
+    # Admin can delete documents from any tenant
+    document = session.exec(
+        select(Document, User).join(User, Document.owner_id == User.id).where(
+            Document.id == document_id
+        )
+    ).first()
+    
     if not document:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found"
         )
     
+    doc, owner = document
+    
     # Import additional models for complete cleanup
     from app.models import (
         DocumentCurationMapping, DocumentSummaryMapping
     )
     
-    # Get document owner info for response
-    owner = session.exec(select(User).where(User.id == document.owner_id)).first()
     owner_name = f"{owner.first_name} {owner.last_name}" if owner else "Unknown"
     
     # Delete physical file
     file_deleted = False
-    if os.path.exists(document.path):
+    if os.path.exists(doc.path):
         try:
-            os.remove(document.path)
+            os.remove(doc.path)
             file_deleted = True
         except Exception as e:
-            print(f"Failed to delete file {document.path}: {e}")
+            print(f"Failed to delete file {doc.path}: {e}")
+    
+    # Delete document access records first (to avoid foreign key constraint)
+    doc_access_records = session.exec(
+        select(DocumentAccess).where(DocumentAccess.document_id == document_id)
+    ).all()
+    for access in doc_access_records:
+        session.delete(access)
+    
+    # Delete document access logs
+    doc_access_logs = session.exec(
+        select(DocumentAccessLog).where(DocumentAccessLog.document_id == document_id)
+    ).all()
+    for log in doc_access_logs:
+        session.delete(log)
     
     # Delete document curation mappings
     doc_curation_mappings = session.exec(
@@ -407,35 +789,109 @@ async def delete_document(
         session.delete(proc_doc)
     
     # Delete the document
-    session.delete(document)
+    session.delete(doc)
     session.commit()
     
     return {
         "message": "Document deleted successfully",
         "document_id": document_id,
-        "document_name": document.filename,
+        "document_name": doc.filename,
         "owner": owner_name,
         "file_deleted": file_deleted,
+        "deleted_access_records": len(doc_access_records),
+        "deleted_access_logs": len(doc_access_logs),
         "deleted_curation_mappings": len(doc_curation_mappings),
         "deleted_summary_mappings": len(doc_summary_mappings),
         "deleted_processing_records": len(processing_docs)
     }
 
+@router.get("/system", response_model=dict)
+async def get_system_info(
+    request: Request,
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
+    session: Session = Depends(get_session)
+):
+    """Get system information and statistics (admin only)"""
+    
+    # Count users within the same tenant
+    total_users = session.exec(select(func.count(User.id)).where(User.tenant_id == tenant_id)).first() or 0
+    active_users = session.exec(select(func.count(User.id)).where(
+        and_(User.tenant_id == tenant_id, User.verified == True)
+    )).first() or 0
+    
+    # Get tenant users for document filtering
+    tenant_user_ids = session.exec(select(User.id).where(User.tenant_id == tenant_id)).all()
+    
+    # Count documents from tenant users only
+    total_documents = 0
+    total_storage = 0
+    if tenant_user_ids:
+        total_documents = session.exec(select(func.count(Document.id)).where(
+            Document.owner_id.in_(tenant_user_ids)
+        )).first() or 0
+        
+        # Calculate storage used by tenant documents only
+        documents = session.exec(select(Document).where(Document.owner_id.in_(tenant_user_ids))).all()
+        for doc in documents:
+            if os.path.exists(doc.path):
+                total_storage += os.path.getsize(doc.path)
+    
+    storage_gb = total_storage / (1024 * 1024 * 1024)
+    
+    # Count AI curations and summaries for tenant users only
+    total_curations = 0
+    total_summaries = 0
+    processing_documents = 0
+    if tenant_user_ids:
+        total_curations = session.exec(select(func.count(AICuration.id)).where(
+            AICuration.owner_id.in_(tenant_user_ids)
+        )).first() or 0
+        total_summaries = session.exec(select(func.count(AISummary.id)).where(
+            AISummary.owner_id.in_(tenant_user_ids)
+        )).first() or 0
+        processing_documents = session.exec(select(func.count(ProcessingDocument.id)).where(
+            ProcessingDocument.owner_id.in_(tenant_user_ids)
+        )).first() or 0
+    
+    return {
+        "users": {
+            "total": total_users,
+            "active": active_users,
+            "inactive": total_users - active_users
+        },
+        "documents": {
+            "total": total_documents,
+            "processing": processing_documents,
+            "completed": total_documents
+        },
+        "storage": {
+            "total_bytes": total_storage,
+            "total_gb": round(storage_gb, 2)
+        },
+        "ai": {
+            "curations": total_curations,
+            "summaries": total_summaries
+        }
+    }
+
 @router.get("/system/stats", response_model=dict)
 async def get_system_stats(
-    admin_user: User = Depends(verify_admin_access),
+    request: Request,
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Get system statistics for current tenant (admin only)"""
     
     # Count users within the same tenant
-    total_users = session.exec(select(func.count(User.id)).where(User.tenant_id == admin_user.tenant_id)).first() or 0
+    total_users = session.exec(select(func.count(User.id)).where(User.tenant_id == tenant_id)).first() or 0
     active_users = session.exec(select(func.count(User.id)).where(
-        (User.tenant_id == admin_user.tenant_id) & (User.verified == True)
+        and_(User.tenant_id == tenant_id, User.verified == True)
     )).first() or 0
     
     # Get tenant users for document filtering
-    tenant_user_ids = session.exec(select(User.id).where(User.tenant_id == admin_user.tenant_id)).all()
+    tenant_user_ids = session.exec(select(User.id).where(User.tenant_id == tenant_id)).all()
     
     # Count documents from tenant users only
     total_documents = 0
@@ -491,7 +947,8 @@ async def get_system_stats(
 
 @router.post("/system/clear-cache", response_model=dict)
 async def clear_system_cache(
-    admin_user: User = Depends(verify_admin_access)
+    request: Request,
+    admin_user: User = Depends(get_current_admin_user)
 ):
     """Clear system cache (admin only)"""
     
@@ -514,21 +971,20 @@ async def clear_system_cache(
 
 @router.post("/system/reindex", response_model=dict)
 async def reindex_documents(
-    admin_user: User = Depends(verify_admin_access),
+    request: Request,
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Reindex all documents (admin only)"""
     
     try:
-        # Get all documents
-        documents = session.exec(select(Document)).all()
+        # Get all documents for the current tenant only
+        tenant_user_ids = session.exec(select(User.id).where(User.tenant_id == tenant_id)).all()
+        documents = session.exec(select(Document).where(Document.owner_id.in_(tenant_user_ids))).all()
         
         # Trigger reindexing (this would depend on your specific implementation)
-        reindexed_count = 0
-        for doc in documents:
-            # Here you would call your reindexing logic
-            # For now, we'll just count the documents
-            reindexed_count += 1
+        reindexed_count = len(documents)
         
         return {
             "message": "Document reindexing completed",
@@ -543,20 +999,31 @@ async def reindex_documents(
 
 @router.get("/system/export", response_model=dict)
 async def export_system_data(
-    admin_user: User = Depends(verify_admin_access),
+    request: Request,
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Export system data (admin only)"""
     
     try:
-        # Get counts for export
-        users_count = session.exec(select(func.count(User.id))).first() or 0
-        documents_count = session.exec(select(func.count(Document.id))).first() or 0
-        curations_count = session.exec(select(func.count(AICuration.id))).first() or 0
-        summaries_count = session.exec(select(func.count(AISummary.id))).first() or 0
+        # Get counts for export (tenant-specific)
+        tenant_user_ids = session.exec(select(User.id).where(User.tenant_id == tenant_id)).all()
+        
+        users_count = len(tenant_user_ids)
+        documents_count = session.exec(select(func.count(Document.id)).where(
+            Document.owner_id.in_(tenant_user_ids)
+        )).first() or 0 if tenant_user_ids else 0
+        curations_count = session.exec(select(func.count(AICuration.id)).where(
+            AICuration.owner_id.in_(tenant_user_ids)
+        )).first() or 0 if tenant_user_ids else 0
+        summaries_count = session.exec(select(func.count(AISummary.id)).where(
+            AISummary.owner_id.in_(tenant_user_ids)
+        )).first() or 0 if tenant_user_ids else 0
         
         export_data = {
             "export_timestamp": datetime.utcnow().isoformat(),
+            "tenant_id": tenant_id,
             "system_stats": {
                 "users": users_count,
                 "documents": documents_count,
@@ -581,18 +1048,27 @@ async def export_system_data(
 
 @router.get("/users/{user_id}", response_model=dict)
 async def get_user_details(
+    request: Request,
     user_id: str,
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Get detailed information about a specific user (admin only)"""
     
-    # Find user
-    user = session.exec(select(User).where(User.id == user_id)).first()
+    # Find user within the same tenant
+    user = session.exec(
+        select(User).where(
+            and_(
+                User.id == user_id,
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            detail="User not found in this tenant"
         )
     
     # Get user's document count
@@ -637,21 +1113,31 @@ async def get_user_details(
         }
     }
 
+# Simplified admin functions for remaining endpoints
 @router.post("/users/{user_id}/reset-password", response_model=dict)
 async def admin_reset_user_password(
+    request: Request,
     user_id: str,
     new_password: str,
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Reset a user's password (admin only)"""
     
-    # Find user
-    user = session.exec(select(User).where(User.id == user_id)).first()
+    # Find user within the same tenant
+    user = session.exec(
+        select(User).where(
+            and_(
+                User.id == user_id,
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            detail="User not found in this tenant"
         )
     
     # Validate password strength
@@ -693,29 +1179,40 @@ class PasswordResetRequest(BaseModel):
 
 @router.post("/users/{user_id}/reset-password-secure", response_model=dict)
 async def admin_reset_user_password_secure(
+    request: Request,
     user_id: str,
     password_data: PasswordResetRequest,
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Reset a user's password with request body (admin only)"""
     
-    return await admin_reset_user_password(user_id, password_data.new_password, admin_user, session)
+    return await admin_reset_user_password(request, user_id, password_data.new_password, admin_user, tenant_id, session)
 
 @router.post("/users/{user_id}/toggle-status", response_model=dict)
 async def toggle_user_status(
+    request: Request,
     user_id: str,
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Toggle user active/inactive status (admin only)"""
     
-    # Find user
-    user = session.exec(select(User).where(User.id == user_id)).first()
+    # Find user within the same tenant
+    user = session.exec(
+        select(User).where(
+            and_(
+                User.id == user_id,
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            detail="User not found in this tenant"
         )
     
     # Prevent admin from deactivating themselves
@@ -751,18 +1248,27 @@ async def toggle_user_status(
 
 @router.post("/users/{user_id}/promote-to-admin", response_model=dict)
 async def promote_user_to_admin(
+    request: Request,
     user_id: str,
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Promote a user to admin role (admin only)"""
     
-    # Find user
-    user = session.exec(select(User).where(User.id == user_id)).first()
+    # Find user within the same tenant
+    user = session.exec(
+        select(User).where(
+            and_(
+                User.id == user_id,
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            detail="User not found in this tenant"
         )
     
     # Check if user is already admin
@@ -790,18 +1296,27 @@ async def promote_user_to_admin(
 
 @router.post("/users/{user_id}/demote-from-admin", response_model=dict)
 async def demote_user_from_admin(
+    request: Request,
     user_id: str,
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Demote an admin user to regular user (admin only)"""
     
-    # Find user
-    user = session.exec(select(User).where(User.id == user_id)).first()
+    # Find user within the same tenant
+    user = session.exec(
+        select(User).where(
+            and_(
+                User.id == user_id,
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            detail="User not found in this tenant"
         )
     
     # Prevent admin from demoting themselves
@@ -836,18 +1351,27 @@ async def demote_user_from_admin(
 
 @router.get("/users/{user_id}/sessions", response_model=List[dict])
 async def get_user_sessions(
+    request: Request,
     user_id: str,
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Get all active sessions for a specific user (admin only)"""
     
-    # Find user
-    user = session.exec(select(User).where(User.id == user_id)).first()
+    # Find user within the same tenant
+    user = session.exec(
+        select(User).where(
+            and_(
+                User.id == user_id,
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            detail="User not found in this tenant"
         )
     
     # Get user's sessions
@@ -876,18 +1400,27 @@ async def get_user_sessions(
 
 @router.post("/users/{user_id}/revoke-sessions", response_model=dict)
 async def revoke_user_sessions(
+    request: Request,
     user_id: str,
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session)
 ):
     """Revoke all active sessions for a specific user (admin only)"""
     
-    # Find user
-    user = session.exec(select(User).where(User.id == user_id)).first()
+    # Find user within the same tenant
+    user = session.exec(
+        select(User).where(
+            and_(
+                User.id == user_id,
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            detail="User not found in this tenant"
         )
     
     # Revoke all active sessions
@@ -910,21 +1443,28 @@ async def revoke_user_sessions(
 
 @router.get("/users/search", response_model=List[dict])
 async def search_users(
+    request: Request,
     q: str = Query(..., min_length=2, description="Search query"),
-    admin_user: User = Depends(verify_admin_access),
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
     session: Session = Depends(get_session),
     limit: int = Query(20, ge=1, le=100)
 ):
     """Search users by name, email, or username (admin only)"""
     
-    # Build search query
+    # Build search query within the same tenant
     search_term = f"%{q.lower()}%"
     
     statement = select(User).where(
-        (func.lower(User.first_name).like(search_term)) |
-        (func.lower(User.last_name).like(search_term)) |
-        (func.lower(User.email).like(search_term)) |
-        (func.lower(User.username).like(search_term))
+        and_(
+            User.tenant_id == tenant_id,
+            or_(
+                func.lower(User.first_name).like(search_term),
+                func.lower(User.last_name).like(search_term),
+                func.lower(User.email).like(search_term),
+                func.lower(User.username).like(search_term)
+            )
+        )
     ).limit(limit)
     
     users = session.exec(statement).all()
@@ -950,3 +1490,106 @@ async def search_users(
         })
     
     return result
+
+@router.get("/users/{user_id}/documents", response_model=List[dict])
+async def get_user_assigned_documents(
+    request: Request,
+    user_id: str,
+    admin_user: User = Depends(get_current_admin_user),
+    tenant_id: str = Depends(get_current_tenant_id_dependency),
+    session: Session = Depends(get_session)
+):
+    """Get all documents assigned to a specific user (admin only)"""
+    
+    # Find user within the same tenant
+    user = session.exec(
+        select(User).where(
+            and_(
+                User.id == user_id,
+                User.tenant_id == tenant_id
+            )
+        )
+    ).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found in this tenant"
+        )
+    
+    assigned_documents = []
+    
+    # Get documents owned by the user
+    owned_documents = session.exec(
+        select(Document).where(Document.owner_id == user_id)
+    ).all()
+    
+    for doc in owned_documents:
+        # Use stored file size from database, fallback to file system check if needed
+        file_size = doc.file_size if hasattr(doc, 'file_size') and doc.file_size else 0
+        
+        # If no stored file size, try to get it from file system (for backward compatibility)
+        if file_size == 0 and os.path.exists(doc.path):
+            try:
+                file_size = os.path.getsize(doc.path)
+                print(f"📊 Admin: Fallback file size calculation for owned doc {doc.filename}: {file_size} bytes")
+            except Exception as e:
+                print(f"❌ Admin: Error getting file size for owned doc {doc.path}: {e}")
+                file_size = 0
+        
+        assigned_documents.append({
+            "id": doc.id,
+            "name": doc.filename,
+            "size": file_size,
+            "assignment_type": "owner",
+            "permissions": ["read", "download", "manage", "query"],
+            "assigned_at": doc.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "assigned_by": "self"
+        })
+    
+    # Get documents explicitly assigned to the user
+    document_accesses = session.exec(
+        select(DocumentAccess).where(
+            and_(
+                DocumentAccess.user_id == user_id,
+                DocumentAccess.tenant_id == tenant_id,
+                DocumentAccess.is_active == True
+            )
+        )
+    ).all()
+    
+    for access in document_accesses:
+        # Get document details
+        doc = session.exec(
+            select(Document).where(Document.id == access.document_id)
+        ).first()
+        
+        if doc:
+            # Use stored file size from database, fallback to file system check if needed
+            file_size = doc.file_size if hasattr(doc, 'file_size') and doc.file_size else 0
+            
+            # If no stored file size, try to get it from file system (for backward compatibility)
+            if file_size == 0 and os.path.exists(doc.path):
+                try:
+                    file_size = os.path.getsize(doc.path)
+                    print(f"📊 Admin: Fallback file size calculation for assigned doc {doc.filename}: {file_size} bytes")
+                except Exception as e:
+                    print(f"❌ Admin: Error getting file size for assigned doc {doc.path}: {e}")
+                    file_size = 0
+            
+            # Get who assigned this document
+            assigned_by_user = session.exec(
+                select(User).where(User.id == access.assigned_by)
+            ).first()
+            assigned_by_name = f"{assigned_by_user.first_name} {assigned_by_user.last_name}" if assigned_by_user else "Unknown"
+            
+            assigned_documents.append({
+                "id": doc.id,
+                "name": doc.filename,
+                "size": file_size,
+                "assignment_type": "assigned",
+                "permissions": access.permissions,
+                "assigned_at": access.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "assigned_by": assigned_by_name
+            })
+    
+    return assigned_documents
