@@ -308,7 +308,7 @@ def upsert(tenant_id: str, texts: List[str], payloads: List[dict], batch_size: i
         print(f"Processed {processed}/{total_texts} chunks ({processed/total_texts*100:.1f}%)")
 
 def search(tenant_id: str, query: str, k: int = 4, document_ids: List[str] = None) -> List[dict]:
-    """ULTRA-FAST search with pre-loaded models and optimized processing"""
+    """ULTRA-FAST search with pre-loaded models and optimized processing - FIXED FOR MULTI-DOCUMENT SUPPORT"""
     search_start = time.time()
     
     # CRITICAL: Ensure collection exists with correct dimensions
@@ -324,47 +324,87 @@ def search(tenant_id: str, query: str, k: int = 4, document_ids: List[str] = Non
     vec = _embed([query])[0].tolist()
     embed_time = time.time() - embed_start
     
-    # Optimized filter building with caching
+    # FIXED: Enhanced filter building with multi-document debugging
     filter_start = time.time()
     search_filter = None
+    document_paths = []
+    
     if document_ids:
         try:
             from sqlmodel import Session, select
             from app.database import engine
             from app.models import Document
             
+            print(f"🔍 Multi-document search: {len(document_ids)} documents selected")
+            
             # Batch query for all document paths at once
             with Session(engine) as session:
-                statement = select(Document.path).where(Document.id.in_(document_ids))
-                document_paths = list(session.exec(statement))
+                statement = select(Document.path, Document.filename).where(Document.id.in_(document_ids))
+                doc_results = list(session.exec(statement))
+                document_paths = [result[0] for result in doc_results]
+                
+                # DEBUG: Show which documents we're searching in
+                print(f"📄 Document paths for search:")
+                for i, (path, filename) in enumerate(doc_results):
+                    print(f"   {i+1}. {filename} -> {path}")
             
             if document_paths:
-                # Optimized filter construction
+                # FIXED: Enhanced filter construction for better multi-document support
                 filter_conditions = [
                     q.FieldCondition(key="path", match=q.MatchValue(value=path))
                     for path in document_paths
                 ]
                 search_filter = q.Filter(should=filter_conditions)
+                print(f"🎯 Created filter for {len(filter_conditions)} document paths")
             else:
+                print(f"❌ No document paths found for IDs: {document_ids}")
                 return []
         except Exception as e:
             print(f"Filter error: {e}")
             return []
     filter_time = time.time() - filter_start
     
-    # ULTRA-FAST search with minimal logging
+    # FIXED: Enhanced search with increased limit for multi-document scenarios
     qdrant_start = time.time()
     try:
+        # CRITICAL FIX: When filtering by multiple documents, increase search limit
+        # to ensure we get results from all documents, then we'll diversify
+        search_limit = k
+        if document_ids and len(document_ids) > 1:
+            # Increase search limit to get more diverse results across documents
+            search_limit = k * min(len(document_ids), 3)  # Up to 3x more results
+            print(f"🔄 Multi-document mode: Increased search limit to {search_limit} for better diversity")
+        
         hits = client.search(
             collection_name=coll_name,
             query_vector=vec,
-            limit=k,
+            limit=search_limit,
             with_payload=True,
             query_filter=search_filter,
         )
-        results = [h.payload for h in hits]
-        qdrant_time = time.time() - qdrant_start
         
+        raw_results = [h.payload for h in hits]
+        
+        # CRITICAL FIX: Ensure diversity across multiple documents
+        if document_ids and len(document_ids) > 1 and len(raw_results) > k:
+            results = _diversify_results_across_documents(raw_results, k, document_paths)
+            print(f"🎯 Diversified {len(raw_results)} results to {len(results)} across {len(document_paths)} documents")
+        else:
+            results = raw_results[:k]
+        
+        # DEBUG: Show result distribution across documents
+        if document_ids and len(document_ids) > 1:
+            result_sources = {}
+            for result in results:
+                path = result.get('path', 'unknown')
+                result_sources[path] = result_sources.get(path, 0) + 1
+            
+            print(f"📊 Result distribution across documents:")
+            for path, count in result_sources.items():
+                filename = path.split('/')[-1] if '/' in path else path
+                print(f"   {filename}: {count} results")
+        
+        qdrant_time = time.time() - qdrant_start
         total_time = time.time() - search_start
         
         # Performance logging (only if slow)
@@ -376,6 +416,55 @@ def search(tenant_id: str, query: str, k: int = 4, document_ids: List[str] = Non
     except Exception as e:
         print(f"Search error: {e}")
         return []
+
+def _diversify_results_across_documents(results: List[dict], target_k: int, document_paths: List[str]) -> List[dict]:
+    """
+    CRITICAL FIX: Ensure search results are distributed across multiple documents
+    instead of being dominated by a single document
+    """
+    if not results or not document_paths or len(document_paths) == 1:
+        return results[:target_k]
+    
+    # Group results by document path
+    results_by_path = {}
+    for result in results:
+        path = result.get('path', 'unknown')
+        if path not in results_by_path:
+            results_by_path[path] = []
+        results_by_path[path].append(result)
+    
+    # Calculate how many results to take from each document
+    num_docs_with_results = len(results_by_path)
+    if num_docs_with_results == 0:
+        return results[:target_k]
+    
+    # Distribute results fairly across documents
+    results_per_doc = max(1, target_k // num_docs_with_results)
+    remaining_slots = target_k - (results_per_doc * num_docs_with_results)
+    
+    diversified_results = []
+    paths_with_results = list(results_by_path.keys())
+    
+    # Take results_per_doc from each document
+    for path in paths_with_results:
+        doc_results = results_by_path[path][:results_per_doc]
+        diversified_results.extend(doc_results)
+    
+    # Fill remaining slots with best scoring results
+    if remaining_slots > 0:
+        all_remaining = []
+        for path in paths_with_results:
+            if len(results_by_path[path]) > results_per_doc:
+                all_remaining.extend(results_by_path[path][results_per_doc:])
+        
+        # Sort by score and take the best remaining ones
+        all_remaining.sort(key=lambda x: x.get('score', 0), reverse=True)
+        diversified_results.extend(all_remaining[:remaining_slots])
+    
+    # Sort final results by score while maintaining diversity
+    diversified_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+    
+    return diversified_results[:target_k]
 
 async def search_async(tenant_id: str, query: str, k: int = 4, document_ids: List[str] = None) -> List[dict]:
     """Async version of search for non-blocking operation"""
