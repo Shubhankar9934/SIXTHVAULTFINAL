@@ -51,7 +51,8 @@ import {
   RefreshCw,
   HelpCircle,
   Bell,
-  User
+  User,
+  AlertTriangle
 } from "lucide-react"
 import {
   AlertDialog,
@@ -473,14 +474,14 @@ function DocumentsPageContent() {
         console.log('Saved model:', savedModel)
         console.log('Available providers:', providers.map(p => p.name))
         
-        // Set default provider priority: Gemini > OpenAI > Groq > Others
-        const providerPriority = ['gemini', 'openai', 'groq', 'deepseek', 'ollama']
+        // Set default provider priority: AWS Bedrock > DeepSeek > OpenAI > Groq > Others
+        const providerPriority = ['bedrock', 'deepseek', 'openai', 'groq', 'gemini', 'ollama']
         let validProvider = savedProvider
         
         if (!validProvider || !providers.find(p => p.name === validProvider)) {
           // Find the first available provider from priority list
           validProvider = providerPriority.find(p => providers.find(provider => provider.name === p)) || 
-                        (providers.length > 0 ? providers[0].name : 'gemini')
+                        (providers.length > 0 ? providers[0].name : 'bedrock')
           console.log('Using priority-based provider:', validProvider)
         }
         setSelectedProvider(validProvider)
@@ -522,6 +523,37 @@ function DocumentsPageContent() {
     }
 
     loadModels()
+
+    // CRITICAL FIX: Add startup check for stuck upload state
+    const checkAndClearStuckUploads = () => {
+      const uploadState = uploadStateManager.getCurrentState()
+      console.log('🔍 STARTUP CHECK: Upload state on page load:', {
+        hasActiveUploads: uploadState.hasActiveUploads,
+        documents: uploadState.documents.length,
+        totalFiles: uploadState.totalFiles,
+        completedFiles: uploadState.completedFiles
+      })
+
+      // If all documents are marked as completed but upload state still has active uploads, force clear
+      if (uploadState.hasActiveUploads && uploadState.totalFiles > 0) {
+        const allCompleted = uploadState.documents.every(doc => doc.status === 'completed' || doc.progress === 100)
+        const hasProcessingStatus = uploadState.documents.some(doc => doc.status === 'uploading' || doc.status === 'processing')
+        
+        console.log('🔍 STARTUP CHECK: Analyzing stuck state:', {
+          allCompleted,
+          hasProcessingStatus,
+          documents: uploadState.documents.map(d => ({ name: d.name, status: d.status, progress: d.progress }))
+        })
+
+        if (allCompleted || !hasProcessingStatus) {
+          console.log('🧹 STARTUP CLEANUP: Detected stuck upload state, force clearing...')
+          uploadStateManager.forceReset()
+        }
+      }
+    }
+
+    // Run the check after models are loaded
+    checkAndClearStuckUploads()
   }, [])
 
   // Update available models when provider changes and persist preferences
@@ -829,9 +861,10 @@ function DocumentsPageContent() {
     }
   }, [])
 
-  // CRITICAL FIX: Add real-time processing updates listener
+  // CRITICAL FIX: Add real-time processing updates listener + periodic upload state cleanup
   useEffect(() => {
     let processingUpdateInterval: NodeJS.Timeout | null = null
+    let uploadStateCleanupInterval: NodeJS.Timeout | null = null
 
     const startProcessingUpdatesListener = () => {
       // Check for processing documents every 2 seconds and update their progress
@@ -870,14 +903,50 @@ function DocumentsPageContent() {
       }, 2000) // Update every 2 seconds
     }
 
+    const startUploadStateCleanup = () => {
+      // Periodically check for stuck upload states and clean them up
+      uploadStateCleanupInterval = setInterval(() => {
+        const uploadState = uploadStateManager.getCurrentState()
+        
+        if (uploadState.hasActiveUploads) {
+          console.log('🧹 PERIODIC CLEANUP: Checking for stuck upload states...')
+          
+          // Check if all documents are actually completed
+          const allCompleted = uploadState.documents.every(doc => 
+            doc.status === 'completed' || doc.progress === 100
+          )
+          
+          // Check if there are no actual processing documents in our UI
+          const hasActiveProcessing = documents.some(doc => 
+            doc.status === 'uploading' || doc.status === 'processing'
+          )
+          
+          // If upload state says active but no actual processing, force clear
+          if (allCompleted || !hasActiveProcessing) {
+            console.log('🧹 PERIODIC CLEANUP: Detected stuck upload state, clearing...', {
+              allCompleted,
+              hasActiveProcessing,
+              uploadStateDocuments: uploadState.documents.length,
+              uiProcessingDocuments: documents.filter(d => d.status === 'uploading' || d.status === 'processing').length
+            })
+            uploadStateManager.forceReset()
+          }
+        }
+      }, 10000) // Check every 10 seconds
+    }
+
     startProcessingUpdatesListener()
+    startUploadStateCleanup()
 
     return () => {
       if (processingUpdateInterval) {
         clearInterval(processingUpdateInterval)
       }
+      if (uploadStateCleanupInterval) {
+        clearInterval(uploadStateCleanupInterval)
+      }
     }
-  }, [])
+  }, [documents]) // Add documents as dependency to check against current UI state
 
   const checkAiStatus = async () => {
     try {
@@ -1199,6 +1268,56 @@ function DocumentsPageContent() {
                           })
                         )
 
+                        // ULTIMATE FIX: Complete in upload state manager using multiple matching strategies
+                        console.log('🔄 UPLOAD STATE COMPLETION: Starting completion process for:', file.name)
+                        const uploadState = uploadStateManager.getCurrentState()
+                        console.log('🔄 UPLOAD STATE DEBUG: Current upload state:', {
+                          totalDocuments: uploadState.documents.length,
+                          activeUploads: uploadState.hasActiveUploads,
+                          documents: uploadState.documents.map(d => ({ id: d.id, name: d.name, status: d.status, progress: d.progress }))
+                        })
+                        
+                        // Strategy 1: Find by exact filename match
+                        let matchingUploadDoc = uploadState.documents.find(doc => doc.name === file.name)
+                        
+                        // Strategy 2: Find by partial filename match (handle encoding differences)
+                        if (!matchingUploadDoc) {
+                          matchingUploadDoc = uploadState.documents.find(doc => 
+                            doc.name.includes(file.name) || file.name.includes(doc.name)
+                          )
+                        }
+                        
+                        // Strategy 3: Find by the isolated document ID (if it matches any upload state ID)
+                        if (!matchingUploadDoc) {
+                          matchingUploadDoc = uploadState.documents.find(doc => doc.id === isolatedDocId)
+                        }
+                        
+                        // Strategy 4: Find the first active upload document (last resort)
+                        if (!matchingUploadDoc) {
+                          matchingUploadDoc = uploadState.documents.find(doc => 
+                            doc.status === 'uploading' || doc.status === 'processing'
+                          )
+                        }
+                        
+                        if (matchingUploadDoc) {
+                          console.log('✅ UPLOAD STATE COMPLETION: Found matching document using strategy, completing:', {
+                            uploadId: matchingUploadDoc.id,
+                            filename: matchingUploadDoc.name,
+                            status: matchingUploadDoc.status,
+                            progress: matchingUploadDoc.progress
+                          })
+                          uploadStateManager.completeDocument(matchingUploadDoc.id)
+                        } else {
+                          console.error('❌ UPLOAD STATE COMPLETION: NO MATCHING DOCUMENT FOUND! Force clearing upload state.')
+                          console.error('Debug info:', {
+                            targetFilename: file.name,
+                            isolatedDocId: isolatedDocId,
+                            uploadStateDocuments: uploadState.documents
+                          })
+                          // Emergency fallback: Force clear the upload state
+                          uploadStateManager.forceReset()
+                        }
+
                         // ENHANCED CROSS-TAB NOTIFICATION: Use document sync manager for immediate vault updates
                         console.log('📡 Documents: Using document sync manager for immediate vault notification')
                         const completedData = message.data || {}
@@ -1210,9 +1329,6 @@ function DocumentsPageContent() {
                         
                         // Also trigger immediate vault refresh for instant dropdown update
                         documentSyncManager.triggerImmediateVaultRefresh()
-                        
-                        // Update upload state manager
-                        uploadStateManager.completeDocument(isolatedDocId)
                 
                 isolatedProgress.value = 100
                 setTimeout(completeIsolatedFile, 600)
@@ -1870,6 +1986,9 @@ function DocumentsPageContent() {
                     duplicatesToRemove: duplicateIds
                   })
                   
+                  // UPLOAD STATE MANAGER: Complete the document in upload state
+                  uploadStateManager.completeDocument(primaryDoc.id)
+                  
                   // Remove duplicates and update the primary document
                   const updatedDocs = prev
                     .filter(doc => !duplicateIds.includes(doc.id)) // Remove duplicates
@@ -1943,6 +2062,9 @@ function DocumentsPageContent() {
                         demographics: completedData.demographics?.length || 0,
                         ai_analysis_complete: completedData.ai_analysis_complete
                       })
+                      
+                      // UPLOAD STATE MANAGER: Complete the document in upload state
+                      uploadStateManager.completeDocument(doc.id)
                       
                       return {
                         ...doc,
@@ -3114,20 +3236,82 @@ function DocumentsPageContent() {
                   </select>
                 </div>
 
-                {/* Current Selection Indicator */}
-                {selectedProvider && selectedModel && (
-                  <div className="flex items-center space-x-2 bg-blue-50 px-3 py-2 rounded-lg border border-blue-200">
-                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
-                    <span className="text-sm font-medium text-blue-700">
-                      Using: {modelProviders.find(p => p.name === selectedProvider)?.displayName} / {availableModels.find(m => m.name === selectedModel)?.displayName}
-                    </span>
-                  </div>
-                )}
                 
                 <Button variant="outline" size="sm">
                   <RefreshCw className="w-4 h-4 mr-2" />
                   Refresh
                 </Button>
+
+                {/* Export Options */}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={async () => {
+                    try {
+                      console.log('🔄 Documents: Exporting transcript summaries as Excel...')
+                      const result = await ragApiClient.exportTranscriptSummaries({ 
+                        format: 'excel', 
+                        includeAll: true 
+                      })
+                      
+                      if (result.success) {
+                        console.log('✅ Documents: Excel export completed successfully')
+                      } else {
+                        throw new Error(result.error || 'Export failed')
+                      }
+                    } catch (error) {
+                      console.error('❌ Documents: Excel export failed:', error)
+                      alert(`Export failed: ${error instanceof Error ? error.message : 'Unknown error occurred'}`)
+                    }
+                  }}
+                  className="bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100"
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  Export Excel
+                </Button>
+
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={async () => {
+                    try {
+                      console.log('🔄 Documents: Exporting transcript summaries as CSV...')
+                      const result = await ragApiClient.exportTranscriptSummaries({ 
+                        format: 'csv', 
+                        includeAll: true 
+                      })
+                      
+                      if (result.success) {
+                        console.log('✅ Documents: CSV export completed successfully')
+                      } else {
+                        throw new Error(result.error || 'Export failed')
+                      }
+                    } catch (error) {
+                      console.error('❌ Documents: CSV export failed:', error)
+                      alert(`Export failed: ${error instanceof Error ? error.message : 'Unknown error occurred'}`)
+                    }
+                  }}
+                  className="bg-blue-50 border-blue-200 text-blue-700 hover:bg-blue-100"
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  Export CSV
+                </Button>
+
+                {/* Debug: Force Clear Upload State (only show if there are active uploads) */}
+                {uploadStateManager.hasActiveUploads() && (
+                  <Button 
+                    variant="outline" 
+                    size="sm"
+                    onClick={() => {
+                      console.log('🔧 MANUAL RESET: Force clearing upload state')
+                      uploadStateManager.forceReset()
+                    }}
+                    className="bg-orange-50 border-orange-200 text-orange-700 hover:bg-orange-100"
+                  >
+                    <AlertTriangle className="w-4 h-4 mr-2" />
+                    Clear Upload State
+                  </Button>
+                )}
               </div>
             </div>
           </div>

@@ -1,5 +1,6 @@
 import { generateText, streamText } from "ai"
 import { createGroq } from "@ai-sdk/groq"
+import { ragApiClient } from './api-client'
 
 // Get GROQ API key from environment variables
 const groqApiKey = process.env.NEXT_PUBLIC_GROQ_API_KEY || "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"
@@ -947,60 +948,101 @@ The combined analysis reveals a comprehensive business intelligence framework th
 
   async streamChatResponse(messages: any[], documents: any[], keepContext: boolean, searchTags: string[] = []) {
     try {
-      let relevantDocs = documents
-      if (searchTags.length > 0) {
-        relevantDocs = documents.filter(
-          (doc) =>
-            doc.themes?.some((theme: string) => searchTags.some((tag: string) => theme.toLowerCase().includes(tag.toLowerCase()))) ||
-            doc.keywords?.some((keyword: string) =>
-              searchTags.some((tag: string) => keyword.toLowerCase().includes(tag.toLowerCase())),
-            ),
-        )
-      }
-
-      const userMessage = messages[messages.length - 1]?.content || ""
-
-      const searchTerms = userMessage
-        .toLowerCase()
-        .split(/\s+/)
-        .filter((term: string) => term.length > 2)
-        .map((term: string) => term.replace(/[^\w]/g, ""))
-
-      const searchResults = relevantDocs.filter((doc) => {
-        const docText = (doc.content || "").toLowerCase()
-        const docName = doc.name.toLowerCase()
-        const docThemes = (doc.themes || []).join(" ").toLowerCase()
-        const docKeywords = (doc.keywords || []).join(" ").toLowerCase()
-        const docSummary = (doc.summary || "").toLowerCase()
-
-        const allText = `${docText} ${docName} ${docThemes} ${docKeywords} ${docSummary}`
-
-        return searchTerms.some(
-          (term: string) => allText.includes(term) || (term.length > 4 && allText.includes(term.substring(0, term.length - 1))),
-        )
-      })
-
-      const documentsToUse = searchResults.length > 0 ? searchResults : relevantDocs.slice(0, 3)
-
-      let documentContext = ""
-      if (documentsToUse.length > 0) {
-        documentContext = documentsToUse
-          .map(
+      // First try to use the API client for streaming (uses frontend selected provider)
+      try {
+        let relevantDocs = documents
+        if (searchTags.length > 0) {
+          relevantDocs = documents.filter(
             (doc) =>
-              `Document: "${doc.name}"
+              doc.themes?.some((theme: string) => searchTags.some((tag: string) => theme.toLowerCase().includes(tag.toLowerCase()))) ||
+              doc.keywords?.some((keyword: string) =>
+                searchTags.some((tag: string) => keyword.toLowerCase().includes(tag.toLowerCase())),
+              ),
+          )
+        }
+
+        const userMessage = messages[messages.length - 1]?.content || ""
+
+        // Build query using message and context
+        let query = userMessage
+        if (keepContext && relevantDocs.length > 0) {
+          const documentInfo = relevantDocs.slice(0, 3).map(doc => 
+            `Document: ${doc.name} - ${doc.summary || 'No summary'}`
+          ).join('; ')
+          query = `Based on these documents (${documentInfo}), please answer: ${userMessage}`
+        }
+
+        // Use the API client which respects frontend provider selection
+        const response = await ragApiClient.queryDocumentsWithConversation(query, {
+          hybrid: true,
+          maxContext: keepContext,
+          documentIds: relevantDocs.map(doc => doc.id).filter(Boolean)
+        })
+        
+        // Convert the response to a streaming format for compatibility
+        return {
+          textStream: async function* () {
+            yield response.answer
+          }
+        }
+      } catch (apiError) {
+        console.log("API client streaming failed, falling back to local Groq:", apiError)
+        
+        // Fallback to local Groq streaming
+        let relevantDocs = documents
+        if (searchTags.length > 0) {
+          relevantDocs = documents.filter(
+            (doc) =>
+              doc.themes?.some((theme: string) => searchTags.some((tag: string) => theme.toLowerCase().includes(tag.toLowerCase()))) ||
+              doc.keywords?.some((keyword: string) =>
+                searchTags.some((tag: string) => keyword.toLowerCase().includes(tag.toLowerCase())),
+              ),
+          )
+        }
+
+        const userMessage = messages[messages.length - 1]?.content || ""
+
+        const searchTerms = userMessage
+          .toLowerCase()
+          .split(/\s+/)
+          .filter((term: string) => term.length > 2)
+          .map((term: string) => term.replace(/[^\w]/g, ""))
+
+        const searchResults = relevantDocs.filter((doc) => {
+          const docText = (doc.content || "").toLowerCase()
+          const docName = doc.name.toLowerCase()
+          const docThemes = (doc.themes || []).join(" ").toLowerCase()
+          const docKeywords = (doc.keywords || []).join(" ").toLowerCase()
+          const docSummary = (doc.summary || "").toLowerCase()
+
+          const allText = `${docText} ${docName} ${docThemes} ${docKeywords} ${docSummary}`
+
+          return searchTerms.some(
+            (term: string) => allText.includes(term) || (term.length > 4 && allText.includes(term.substring(0, term.length - 1))),
+          )
+        })
+
+        const documentsToUse = searchResults.length > 0 ? searchResults : relevantDocs.slice(0, 3)
+
+        let documentContext = ""
+        if (documentsToUse.length > 0) {
+          documentContext = documentsToUse
+            .map(
+              (doc) =>
+                `Document: "${doc.name}"
 Content: ${doc.content?.substring(0, 1500) || "No content available"}
 Summary: ${doc.summary || "No summary available"}
 Themes: ${doc.themes?.join(", ") || "None"}
 Keywords: ${doc.keywords?.join(", ") || "None"}
 Demographics: ${doc.demographics?.join(", ") || "None"}
 ---`,
-          )
-          .join("\n\n")
-      }
+            )
+            .join("\n\n")
+        }
 
-      let systemPrompt = ""
-      if (keepContext && documentContext) {
-        systemPrompt = `You are a RAG (Retrieval Augmented Generation) assistant. Answer questions ONLY based on the provided document context. Do not use any external knowledge beyond what's in these documents.
+        let systemPrompt = ""
+        if (keepContext && documentContext) {
+          systemPrompt = `You are a RAG (Retrieval Augmented Generation) assistant. Answer questions ONLY based on the provided document context. Do not use any external knowledge beyond what's in these documents.
 
 DOCUMENT CONTEXT:
 ${documentContext}
@@ -1014,14 +1056,14 @@ INSTRUCTIONS:
 - Make your response visually structured and easy to read
 
 USER QUESTION: ${userMessage}`
-      } else if (keepContext && !documentContext) {
-        systemPrompt = `I cannot find any relevant documents to answer your question. Please upload documents or adjust your search criteria.
+        } else if (keepContext && !documentContext) {
+          systemPrompt = `I cannot find any relevant documents to answer your question. Please upload documents or adjust your search criteria.
 
 Available documents: ${documents.length}
 Search tags used: ${searchTags.join(", ") || "None"}
 Question: ${userMessage}`
-      } else {
-        systemPrompt = `You are a helpful AI assistant with access to uploaded documents. Use both the document context and your general knowledge to provide comprehensive answers.
+        } else {
+          systemPrompt = `You are a helpful AI assistant with access to uploaded documents. Use both the document context and your general knowledge to provide comprehensive answers.
 
 DOCUMENT CONTEXT:
 ${documentContext || "No relevant documents found."}
@@ -1035,15 +1077,16 @@ INSTRUCTIONS:
 - Make your response visually structured and easy to read
 
 USER QUESTION: ${userMessage}`
-      }
+        }
 
-      const model = getGroqModel()
-      return streamText({
-        model,
-        messages: [{ role: "system", content: systemPrompt }],
-        temperature: 0.7,
-        maxTokens: 1000,
-      })
+        const model = getGroqModel()
+        return streamText({
+          model,
+          messages: [{ role: "system", content: systemPrompt }],
+          temperature: 0.7,
+          maxTokens: 1000,
+        })
+      }
     } catch (error) {
       console.error("Error streaming chat response:", error)
       throw error

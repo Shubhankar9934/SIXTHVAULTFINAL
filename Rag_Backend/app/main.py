@@ -15,6 +15,8 @@ from app.routes.providers import router as providers_router
 from app.routes.tenants import router as tenants_router
 from app.routes.performance import router as performance_router
 from app.routes.email import router as email_router
+from app.routes.transcript_analysis import router as transcript_analysis_router
+from app.routes.bulk_export import router as bulk_export_router
 from app.auth.routes import router as auth_router
 from app.utils.broadcast import subscribe, unsubscribe
 from app.auth.jwt_handler import verify_token
@@ -275,6 +277,8 @@ app.include_router(documents_router)
 app.include_router(curations_router)
 app.include_router(summaries_router)
 app.include_router(conversations_router)
+app.include_router(transcript_analysis_router)
+app.include_router(bulk_export_router)
 app.include_router(providers_router)
 app.include_router(performance_router)
 app.include_router(email_router)

@@ -1706,6 +1706,73 @@ export class RagApiClient {
   }
 
   /**
+   * Update curation content with user edits
+   */
+  async updateCurationContent(
+    curationId: string,
+    content: string,
+    title?: string,
+    description?: string
+  ): Promise<{ success: boolean; message: string; curation?: any }> {
+    try {
+      console.log('🔄 API Client: Updating curation content for:', curationId)
+      
+      const requestBody: any = {
+        content: content
+      }
+      
+      if (title) {
+        requestBody.title = title
+      }
+      
+      if (description) {
+        requestBody.description = description
+      }
+      
+      const response = await this.makeAuthenticatedRequest(
+        `${this.baseUrl}/curations/${curationId}/content`,
+        {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'ngrok-skip-browser-warning': 'true'
+          },
+          body: JSON.stringify(requestBody)
+        }
+      )
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        console.error('❌ API Client: Curation content update failed:', response.status, errorData)
+        throw new Error(errorData.detail || `Failed to update curation content: ${response.status}`)
+      }
+
+      const result = await response.json()
+      console.log('✅ API Client: Curation content updated successfully:', {
+        success: result.success,
+        curationId: curationId,
+        message: result.message
+      })
+      return result
+    } catch (error) {
+      console.error('💥 API Client: Failed to update curation content:', error)
+      
+      // Handle authentication errors specifically
+      if (error instanceof Error && error.message.includes('Authentication expired')) {
+        return {
+          success: false,
+          message: 'Your session has expired. Please refresh the page to log in again.'
+        }
+      }
+      
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Unknown error occurred'
+      }
+    }
+  }
+
+  /**
    * Delete a curation
    */
   async deleteCuration(curationId: string): Promise<{ success: boolean; message: string }> {
@@ -1774,6 +1841,142 @@ export class RagApiClient {
         success: false,
         message: error instanceof Error ? error.message : 'Unknown error occurred'
       }
+    }
+  }
+
+  /**
+   * Share admin curation with account users
+   */
+  async shareCurationWithAccountUsers(curationId: string): Promise<{ success: boolean; message: string }> {
+    try {
+      console.log('👑 API Client: Sharing admin curation with account users:', curationId)
+      
+      const response = await this.makeAuthenticatedRequest(
+        `${this.baseUrl}/curations/${curationId}/share-with-account`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'ngrok-skip-browser-warning': 'true'
+          }
+        }
+      )
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        console.error('❌ API Client: Failed to share admin curation:', response.status, errorData)
+        throw new Error(errorData.detail || `Failed to share curation: ${response.status}`)
+      }
+
+      const result = await response.json()
+      console.log('✅ API Client: Admin curation shared successfully:', {
+        success: result.success,
+        curationId: curationId,
+        message: result.message
+      })
+      return {
+        success: true,
+        message: result.message || 'Curation shared with account users successfully'
+      }
+    } catch (error) {
+      console.error('💥 API Client: Failed to share admin curation:', error)
+      
+      // Handle authentication errors specifically
+      if (error instanceof Error && error.message.includes('Authentication expired')) {
+        return {
+          success: false,
+          message: 'Your session has expired. Please refresh the page to log in again.'
+        }
+      }
+      
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Unknown error occurred'
+      }
+    }
+  }
+
+  /**
+   * Get admin-shared curations for regular users
+   */
+  async getSharedAdminCurations(): Promise<AICuration[]> {
+    try {
+      console.log('👥 API Client: Fetching admin-shared curations for user')
+      
+      const response = await this.makeAuthenticatedRequest(
+        `${this.baseUrl}/curations/shared-from-admin`,
+        {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'ngrok-skip-browser-warning': 'true'
+          }
+        }
+      )
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        
+        if (response.status === 404) {
+          console.log('📍 API Client: No shared admin curations endpoint found (normal), returning empty array')
+          return []
+        }
+        
+        // For admin users, the backend returns empty array, not an error
+        if (response.status === 403 || (errorData.detail && errorData.detail.includes('admin'))) {
+          console.log('👑 API Client: Admin user detected, no shared curations needed, returning empty array')
+          return []
+        }
+        
+        // Don't log as error for shared curations - just info level to prevent UI console errors
+        console.log('📋 API Client: Shared curations request failed (normal for admin users), returning empty array:', response.status)
+        return []
+      }
+
+      const responseText = await response.text()
+      console.log('📝 API Client: Raw shared curations response length:', responseText.length)
+      
+      if (!responseText.trim()) {
+        console.log('📋 API Client: Empty shared curations response (normal for admin users or no shared curations)')
+        return []
+      }
+
+      let data
+      try {
+        data = JSON.parse(responseText)
+        console.log('✅ API Client: Successfully parsed shared curations data:', data)
+      } catch (parseError) {
+        console.error('❌ API Client: Failed to parse shared curations JSON:', parseError)
+        return []
+      }
+
+      const sharedCurations = Array.isArray(data) ? data : []
+      console.log('🎉 API Client: Successfully fetched', sharedCurations.length, 'admin-shared curations')
+      
+      // Log details of each shared curation for debugging
+      sharedCurations.forEach((curation, index) => {
+        console.log(`👑 Shared Curation ${index + 1}:`, {
+          id: curation.id,
+          title: curation.title,
+          status: curation.status,
+          sharedBy: curation.shared_by || 'Admin',
+          autoGenerated: curation.autoGenerated
+        })
+      })
+      
+      return sharedCurations
+    } catch (error) {
+      console.error('💥 API Client: Failed to fetch admin-shared curations:', error)
+      
+      // Handle authentication errors specifically
+      if (error instanceof Error && error.message.includes('Authentication expired')) {
+        console.warn('🚨 API Client: Authentication expired while fetching shared curations')
+        return []
+      }
+      
+      // Never throw errors for shared curations - always return empty array to prevent UI issues
+      console.warn('⚠️ API Client: Returning empty array for shared curations to prevent UI errors')
+      return []
     }
   }
 
@@ -2369,12 +2572,13 @@ export class RagApiClient {
     url.searchParams.set('hybrid', hybrid.toString())
     url.searchParams.set('max_context', maxContext.toString())
 
-    console.log('🎯 API Client: Enhanced query with agentic RAG support:', {
+    console.log('🎯 API Client: Enhanced query with frontend-first provider selection:', {
       mode,
       hybrid,
       provider,
       model,
-      maxContext
+      maxContext,
+      frontendSelection: provider && model ? 'Used' : 'Fallback'
     })
 
     try {
@@ -2387,23 +2591,166 @@ export class RagApiClient {
         body: JSON.stringify({ 
           question,
           document_ids: documentIds,
-          provider: provider,
-          model: model,
+          preferred_provider: provider, // Use preferred_provider to signal frontend choice
+          preferred_model: model,       // Use preferred_model to signal frontend choice
+          provider: provider,           // Keep for backward compatibility
+          model: model,                 // Keep for backward compatibility
           conversation_id: conversationId,
           save_conversation: saveConversation,
-          mode: mode // Include mode in request body
+          mode: mode,
+          frontend_provider_selection: true // Flag to indicate frontend-driven selection
         })
       })
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}))
+        
+        // Enhanced error handling with fallback mechanism
+        if (errorData.detail && errorData.detail.includes('provider') && provider !== 'gemini') {
+          console.warn(`🔄 API Client: Provider ${provider} failed, attempting fallback to gemini`)
+          
+          // Retry with fallback provider
+          return this.queryDocumentsWithConversation(question, {
+            ...options,
+            provider: 'gemini',
+            model: 'gemini-1.5-flash'
+          })
+        }
+        
         throw new Error(errorData.detail || `Query failed: ${response.status}`)
+      }
+
+      const result = await response.json()
+      
+      // Log successful provider usage
+      if (result.provider_used) {
+        console.log('✅ API Client: Query completed with provider:', {
+          requested: provider,
+          used: result.provider_used,
+          model_used: result.model_used,
+          fallback_occurred: result.provider_used !== provider
+        })
+      }
+
+      return result
+    } catch (error) {
+      console.error('❌ API Client: Query error:', error)
+      
+      // If the error is provider-related and we haven't tried fallback yet
+      if (error instanceof Error && 
+          error.message.includes('provider') && 
+          provider !== 'gemini') {
+        console.warn(`🔄 API Client: Attempting fallback due to error: ${error.message}`)
+        
+        try {
+          return await this.queryDocumentsWithConversation(question, {
+            ...options,
+            provider: 'gemini',
+            model: 'gemini-1.5-flash'
+          })
+        } catch (fallbackError) {
+          console.error('❌ API Client: Fallback also failed:', fallbackError)
+          throw error // Throw original error if fallback also fails
+        }
+      }
+      
+      throw error
+    }
+  }
+
+  /**
+   * Bulk Export API Methods
+   */
+
+  /**
+   * Get available documents for export summary
+   */
+  async getBulkExportSummary(): Promise<{
+    total_documents: number
+    transcript_documents: number
+    analyzed_documents: number
+    ready_for_export: boolean
+  }> {
+    try {
+      const response = await this.makeAuthenticatedRequest(
+        `${this.baseUrl}/bulk-export/available-documents`
+      )
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || `Failed to get export summary: ${response.status}`)
       }
 
       return await response.json()
     } catch (error) {
-      console.error('Query error:', error)
-      throw error
+      console.error('API Client: Failed to get bulk export summary:', error)
+      return {
+        total_documents: 0,
+        transcript_documents: 0,
+        analyzed_documents: 0,
+        ready_for_export: false
+      }
+    }
+  }
+
+  /**
+   * Export transcript summaries in bulk
+   */
+  async exportTranscriptSummaries(options: {
+    format?: 'excel' | 'csv'
+    includeAll?: boolean
+  } = {}): Promise<{ success: boolean; downloadUrl?: string; error?: string }> {
+    try {
+      const { format = 'excel', includeAll = false } = options
+      
+      const params = new URLSearchParams()
+      params.set('format', format)
+      params.set('include_all', includeAll.toString())
+
+      const response = await this.makeAuthenticatedRequest(
+        `${this.baseUrl}/bulk-export/transcript-summaries?${params}`
+      )
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || `Export failed: ${response.status}`)
+      }
+
+      // Handle file download
+      const blob = await response.blob()
+      const downloadUrl = window.URL.createObjectURL(blob)
+      
+      // Extract filename from Content-Disposition header
+      const contentDisposition = response.headers.get('Content-Disposition')
+      let filename = `sixthvault_export_${new Date().toISOString().split('T')[0]}.${format === 'excel' ? 'xlsx' : 'csv'}`
+      
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/)
+        if (filenameMatch) {
+          filename = filenameMatch[1]
+        }
+      }
+
+      // Create download link and trigger download
+      const link = document.createElement('a')
+      link.href = downloadUrl
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      
+      // Clean up object URL after a delay
+      setTimeout(() => {
+        window.URL.revokeObjectURL(downloadUrl)
+      }, 1000)
+
+      return { success: true, downloadUrl }
+    } catch (error) {
+      console.error('API Client: Failed to export transcript summaries:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred'
+      }
     }
   }
 

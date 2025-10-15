@@ -997,6 +997,10 @@ Insights: {combined_summaries}"""
     def _build_prompt(self, text: str, is_research_data: bool, strategy: str) -> str:
         """Build appropriate prompt based on content type and strategy"""
         
+        # Check if this is transcript analysis content
+        if self._is_transcript_content(text):
+            return self._build_transcript_analysis_prompt(text)
+        
         if is_research_data:
             return f"""Act as Chief Insights Officer for a global market research leader. Transform this consumer data into a comprehensive strategic blueprint.
 
@@ -1134,6 +1138,155 @@ Section Summaries:
 
 Section Summaries:
 {combined_summaries}"""
+    
+    def _is_transcript_content(self, text: str) -> bool:
+        """
+        Simple token-based detection for transcript/customer feedback content.
+        Uses ReAct reasoning approach - no external dependencies.
+        """
+        
+        # REASONING: Analyze text tokens for transcript indicators
+        text_lower = text.lower()
+        text_tokens = text_lower.split()
+        
+        # Define scoring weights for different indicator types
+        score = 0
+        
+        # Primary transcript indicators (weight: 2)
+        primary_indicators = [
+            'transcript', 'interview', 'feedback', 'client', 'customer', 
+            'satisfaction', 'rating', 'recommendation', 'experience'
+        ]
+        primary_score = sum(2 for word in primary_indicators if word in text_tokens)
+        
+        # Secondary indicators (weight: 1)
+        secondary_indicators = [
+            'said', 'mentioned', 'expressed', 'highlighted', 'concerns',
+            'satisfied', 'improvement', 'service', 'quality', 'partnership'
+        ]
+        secondary_score = sum(1 for word in secondary_indicators if word in text_tokens)
+        
+        # THINKING: Look for specific phrases that strongly indicate feedback
+        feedback_phrases = [
+            'likelihood of recommendation', 'out of 10', 'rating the', 
+            'client is satisfied', 'areas for improvement', 'room for improvement',
+            'generally satisfied', 'positive experience', 'sees room for',
+            'would like to see', 'concerns about', 'client expressed'
+        ]
+        phrase_score = sum(3 for phrase in feedback_phrases if phrase in text_lower)
+        
+        # ACTING: Calculate final score and make decision
+        total_score = primary_score + secondary_score + phrase_score
+        
+        # Additional heuristics
+        has_rating_pattern = bool(re.search(r'\d+\s*out of\s*\d+', text_lower))
+        has_client_mentions = text_lower.count('client') + text_lower.count('customer') >= 2
+        has_feedback_structure = 'satisfaction' in text_lower and 'improvement' in text_lower
+        
+        # Final decision logic
+        is_transcript = (
+            total_score >= 5 or  # Strong keyword presence
+            has_rating_pattern or  # Has rating format
+            (has_client_mentions and has_feedback_structure)  # Clear feedback structure
+        )
+        
+        # Force transcript detection for obvious customer feedback content
+        if any(phrase in text_lower for phrase in [
+            'client is generally satisfied', 'likelihood of recommendation at',
+            'areas for improvement', 'client expressed', 'client highlighted'
+        ]):
+            is_transcript = True
+        
+        logger.info(f"ReAct transcript detection - score: {total_score}, rating: {has_rating_pattern}, result: {is_transcript}")
+        return is_transcript
+    
+    def _build_transcript_analysis_prompt(self, text: str) -> str:
+        """Build comprehensive transcript analysis with proper quote structure and extended summaries"""
+        return f"""You are an expert transcript analyst. Analyze this customer feedback transcript using ReAct methodology internally, then provide a comprehensive output following the exact structure below.
+
+**ANALYSIS INSTRUCTIONS:**
+- Use verbatim quotes directly from the transcript
+- Provide analytical extended summaries with business impact
+- Be exhaustive in coverage - don't miss any points
+- Focus on strategic implications and business context
+- Group related points thematically
+- Remove speaker identifiers and timestamps from quotes
+- Justify each point with proper reasoning
+
+**OUTPUT FORMAT (follow this EXACT structure):**
+
+## **Comprehensive Transcript Summary**
+
+### **A. Summary of the Transcript**
+[Write a concise 150-word summary providing a comprehensive overview of the entire conversation, including context, participants, purpose, key themes discussed, and overall flow of the discussion. Be precise and focus on the most critical elements.]
+
+### **B. Name of the Company**
+[Extract the client company name from the transcript]
+
+### **C. Overall Sentiment**
+**Respondent Quote:**
+"[Include the most representative verbatim quote that captures their overall satisfaction/sentiment]"
+
+• [Strategic relationship positioning analysis]
+• [Business partnership implications] 
+• [Future engagement potential]
+• [Risk and opportunity assessment]
+
+### **D. Reasons Which Make Them Happy**
+[For each positive aspect mentioned, create a section with:]
+
+**Respondent Quote:**
+"[Verbatim quote about this specific strength]"
+
+• [Why this strength matters to business success]
+• [Competitive advantage or market positioning impact]
+• [Customer satisfaction and retention implications]
+• [Strategic value for long-term partnership]
+
+[Repeat this format for ALL positive aspects mentioned]
+
+### **E. Things That Can Be Improved**
+[For each improvement area mentioned, create a section with:]
+
+**Respondent Quote:**
+"[Verbatim quote about this specific weakness or improvement need]"
+
+• [Root cause analysis of the underlying issue]
+• [Business impact and potential revenue/relationship risks]
+• [Specific strategic actions required to address]
+• [Timeline and priority level for implementation]
+
+[Repeat this format for ALL improvement areas mentioned]
+
+### **F. Agreement to Share Information**
+[Provide clear statement of whether the respondent explicitly agreed to share their feedback, based on direct statements in the transcript]
+
+### **G. Summary of Issues and Stories Mentioned**
+[For each key story, anecdote, or specific issue discussed, create a section with:]
+
+**Respondent Quote:**
+"[Key quote that illustrates or introduces this story/issue]"
+
+• [Detailed context and background of the situation]
+• [Why the respondent chose to share this specific example]
+• [Business impact and operational implications revealed]
+• [Strategic insights for improving business relationship]
+• [Recommended actions based on this story/issue]
+
+[Repeat this format for ALL stories and issues mentioned - be exhaustive]
+
+**CRITICAL REQUIREMENTS:**
+- Use only verbatim quotes from the transcript (no paraphrasing in quote sections)
+- Make extended summaries analytical and business-focused
+- Cover every single point mentioned in the transcript
+- Group related themes together logically
+- Provide proper justification and reasoning for each analysis
+- Focus on strategic business implications
+- Maintain professional, analytical tone throughout
+- Do not include any speaker identifiers, timestamps, or numbering systems from the original transcript
+
+**TRANSCRIPT TO ANALYZE:**
+{text}"""
     
     def get_performance_report(self) -> Dict:
         """Get performance statistics for all models"""

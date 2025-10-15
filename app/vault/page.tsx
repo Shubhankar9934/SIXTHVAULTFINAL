@@ -92,6 +92,8 @@ import { formatContentWithMath, containsMath } from "@/components/ui/math-render
 import HistorySection from "./history-section"
 import { EmailShareModal } from '@/components/email-share-modal'
 import { useEmailShare, getUserInfoForEmail } from '@/hooks/use-email-share'
+import { ragApiClient } from "@/lib/api-client"
+import AICurationEditor from '@/components/ai-curation-editor'
 
 function VaultPageContent() {
   const { logout, user } = useAuth()
@@ -143,6 +145,16 @@ function VaultPageContent() {
   const [customSummaryKeywords, setCustomSummaryKeywords] = useState("")
   const [customSummaryFocusArea, setCustomSummaryFocusArea] = useState("")
   const [isCreatingCustomSummary, setIsCreatingCustomSummary] = useState(false)
+
+  // AI Curation Editor State
+  const [showCurationEditor, setShowCurationEditor] = useState(false)
+  const [editingCuration, setEditingCuration] = useState<any>(null)
+  
+  // Inline Curation Editor State
+  const [inlineEditingMessageId, setInlineEditingMessageId] = useState<number | null>(null)
+  const [editedTitle, setEditedTitle] = useState("")
+  const [editedContent, setEditedContent] = useState("")
+  const [isSavingInlineEdit, setIsSavingInlineEdit] = useState(false)
 
   // Email sharing functionality
   const userInfo = getUserInfoForEmail()
@@ -406,6 +418,203 @@ function VaultPageContent() {
   const formatContent = (content: string) => {
     // Use the enhanced math-enabled formatter
     return formatContentWithMath(content)
+  }
+
+  // Inline editing functions
+  const handleStartInlineEdit = (message: any) => {
+    setInlineEditingMessageId(message.id)
+    setEditedTitle(message.title || "")
+    setEditedContent(message.content || "")
+  }
+
+  const handleCancelInlineEdit = () => {
+    setInlineEditingMessageId(null)
+    setEditedTitle("")
+    setEditedContent("")
+  }
+
+  const handleSaveInlineEdit = async () => {
+    if (!inlineEditingMessageId) return
+    
+    setIsSavingInlineEdit(true)
+    
+    try {
+      // Find the message being edited
+      const messageToEdit = chatMessages.find(msg => msg.id === inlineEditingMessageId)
+      if (!messageToEdit) return
+
+      // Find the original curation to update instead of creating a duplicate
+      const originalTitle = messageToEdit.title || ""
+      let existingCuration = [...customCurations, ...dynamicCurations].find(c => c.title === originalTitle)
+      
+      // FIXED: Save changes to database via API call
+      try {
+        if (existingCuration && existingCuration.id) {
+          console.log('💾 Saving curation changes to database:', {
+            id: existingCuration.id,
+            title: editedTitle,
+            content: editedContent
+          })
+          
+          // Call the API to update curation content in database
+          const response = await ragApiClient.updateCurationContent(
+            existingCuration.id,
+            editedContent,
+            editedTitle,
+            "User-edited AI curation with personal insights and modifications"
+          )
+          
+          if (response.success) {
+            console.log('✅ Successfully saved curation changes to database')
+            
+            // Update the message in chat after successful database save
+            const updatedMessages = chatMessages.map(msg => {
+              if (msg.id === inlineEditingMessageId) {
+                return {
+                  ...msg,
+                  title: editedTitle,
+                  content: editedContent,
+                  timestamp: new Date().toISOString(),
+                  cached: false, // Mark as edited content
+                  themes: [...(msg.themes || []), "User Edited", "Database Saved"]
+                }
+              }
+              return msg
+            })
+            
+            dispatch({ type: 'SET_CHAT_MESSAGES', payload: updatedMessages })
+            
+            // Update the existing curation in the sidebar lists
+            const updatedCustomCurations = customCurations.map(curation => {
+              if (curation.id === existingCuration.id) {
+                return {
+                  ...curation,
+                  title: editedTitle
+                }
+              }
+              return curation
+            })
+            
+            const updatedDynamicCurations = dynamicCurations.map(curation => {
+              if (curation.id === existingCuration.id) {
+                return {
+                  ...curation,
+                  title: editedTitle
+                }
+              }
+              return curation
+            })
+            
+            dispatch({ type: 'SET_CUSTOM_CURATIONS', payload: updatedCustomCurations })
+            dispatch({ type: 'SET_DYNAMIC_CURATIONS', payload: updatedDynamicCurations })
+            
+            // Update cache with new content to ensure persistence and immediate refresh
+            const contentCacheKey = `curation_content_${existingCuration.id}`
+            cacheManager.set(contentCacheKey, editedContent)
+            
+            // Also force clear any old cache entries to prevent stale data
+            cacheManager.delete(`curation_${existingCuration.id}`)
+            cacheManager.delete(`curation_list_cache`)
+            
+            // Force refresh the curation data from database to ensure consistency
+            console.log('🔄 Forcing curation data refresh to ensure latest content is available')
+            
+            // Update the curation title cache as well if title changed
+            if (editedTitle !== (messageToEdit.title || "")) {
+              const titleCacheKey = `curation_title_${existingCuration.id}`
+              cacheManager.set(titleCacheKey, editedTitle)
+            }
+            
+            // If user is admin, automatically make this curation available to regular users
+            if (user?.is_admin) {
+              try {
+                console.log('👑 Admin user detected - making curation available to all account users')
+                await ragApiClient.shareCurationWithAccountUsers(existingCuration.id)
+                console.log('✅ Admin curation shared with account users successfully')
+              } catch (shareError) {
+                console.warn('⚠️ Failed to share admin curation with account users:', shareError)
+              }
+            }
+            
+            // Success message removed - no chat notification needed for inline edits
+            console.log('✅ Successfully updated curation and saved to database:', editedTitle)
+            
+            // Clear editing state
+            handleCancelInlineEdit()
+            
+          } else {
+            throw new Error(response.message || 'Failed to save to database')
+          }
+        } else {
+          // Fallback: Update UI only if no curation ID found
+          console.log('⚠️ No curation ID found, updating UI only (changes may not persist)')
+          
+          // Update the message in chat immediately for better UX
+          const updatedMessages = chatMessages.map(msg => {
+            if (msg.id === inlineEditingMessageId) {
+              return {
+                ...msg,
+                title: editedTitle,
+                content: editedContent,
+                timestamp: new Date().toISOString(),
+                cached: false, // Mark as edited content
+                themes: [...(msg.themes || []), "User Edited", "Local Only"]
+              }
+            }
+            return msg
+          })
+          
+          dispatch({ type: 'SET_CHAT_MESSAGES', payload: updatedMessages })
+          
+          // Show warning message
+          const warningMessage = {
+            id: Date.now(),
+            type: "ai" as const,
+            content: `⚠️ Your edits to "${editedTitle}" have been saved locally for this session only. Changes may not persist when you refresh the page.`,
+            timestamp: new Date().toISOString(),
+            themes: ["System", "Warning", "Local Storage"]
+          }
+          
+          dispatch({ type: 'ADD_CHAT_MESSAGE', payload: warningMessage })
+          
+          // Clear editing state
+          handleCancelInlineEdit()
+        }
+        
+      } catch (apiError) {
+        console.error('❌ Failed to save to database:', apiError)
+        
+        // Show error message
+        const errorMessage = {
+          id: Date.now(),
+          type: "ai" as const,
+          content: `❌ Failed to save changes to database. Error: ${apiError instanceof Error ? apiError.message : 'Unknown error'}. Changes are local only.`,
+          timestamp: new Date().toISOString(),
+          themes: ["System", "Error", "Database", "Local Fallback"]
+        }
+        
+        dispatch({ type: 'ADD_CHAT_MESSAGE', payload: errorMessage })
+        
+        // Clear editing state even on error
+        handleCancelInlineEdit()
+      }
+      
+    } catch (error) {
+      console.error('Failed to save inline edit:', error)
+      
+      // Show error message
+      const errorMessage = {
+        id: Date.now(),
+        type: "ai" as const,
+        content: `❌ Failed to save changes. Please try again. Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        timestamp: new Date().toISOString(),
+        themes: ["System", "Error", "Inline Edit"]
+      }
+      
+      dispatch({ type: 'ADD_CHAT_MESSAGE', payload: errorMessage })
+    } finally {
+      setIsSavingInlineEdit(false)
+    }
   }
 
   const handleConversationSelect = (conversationId: string) => {
@@ -1045,7 +1254,7 @@ function VaultPageContent() {
                               </div>
                               <div className="grid gap-2">
                                 <Label htmlFor="description" className="text-sm font-medium">
-                                  Description (Optional)
+                                  Description *
                                 </Label>
                                 <Textarea
                                   id="description"
@@ -1105,7 +1314,7 @@ function VaultPageContent() {
                               </Button>
                               <Button
                                 onClick={async () => {
-                                  if (!customCurationTitle.trim() || !customCurationKeywords.trim()) {
+                                  if (!customCurationTitle.trim() || !customCurationDescription.trim() || !customCurationKeywords.trim()) {
                                     return
                                   }
                                   
@@ -1134,7 +1343,7 @@ function VaultPageContent() {
                                     setIsCreatingCustomCuration(false)
                                   }
                                 }}
-                                disabled={!customCurationTitle.trim() || !customCurationKeywords.trim() || isCreatingCustomCuration}
+                                disabled={!customCurationTitle.trim() || !customCurationDescription.trim() || !customCurationKeywords.trim() || isCreatingCustomCuration}
                                 className="bg-purple-600 hover:bg-purple-700"
                               >
                                 {isCreatingCustomCuration ? (
@@ -1222,35 +1431,6 @@ function VaultPageContent() {
                                           >
                                             <Mail className="w-3 h-3 mr-2" />
                                             Send as Email
-                                          </Button>
-                                          <Button
-                                            variant="ghost"
-                                            size="sm"
-                                            className="w-full justify-start text-xs h-8"
-                                            onClick={() => {
-                                              // Share functionality
-                                              navigator.clipboard.writeText(`AI Curation: ${curation.title}`)
-                                            }}
-                                          >
-                                            <Share2 className="w-3 h-3 mr-2" />
-                                            Share
-                                          </Button>
-                                          <Button
-                                            variant="ghost"
-                                            size="sm"
-                                            className="w-full justify-start text-xs h-8"
-                                            onClick={() => {
-                                              // Rename functionality (placeholder)
-                                              const newName = prompt("Enter new name:", curation.title)
-                                              if (newName && newName.trim()) {
-                                                console.log("Rename to:", newName)
-                                              }
-                                            }}
-                                          >
-                                            <svg className="w-3 h-3 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                                            </svg>
-                                            Rename
                                           </Button>
                                           <Button
                                             variant="ghost"
@@ -1885,23 +2065,172 @@ function VaultPageContent() {
 
               <div>
                 <label className="text-xs font-medium text-slate-600 mb-1 block">Tags Filter</label>
-                <Input
-                  value={searchTag}
-                  onChange={(e) => setSearchTag(e.target.value)}
-                  placeholder="Filter by tags..."
-                  className="bg-white border-slate-200 rounded-lg h-8 text-xs hover:border-slate-300 transition-colors"
-                />
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      className="w-full justify-between bg-white border-slate-200 rounded-lg h-8 text-xs hover:border-slate-300 transition-colors"
+                    >
+                      <div className="flex items-center space-x-2 flex-1 min-w-0">
+                        <Filter className="w-3 h-3 text-slate-500 flex-shrink-0" />
+                        <span className="truncate">
+                          {searchTag.length === 0
+                            ? "Filter by tags..."
+                            : `${searchTag.length} tag${searchTag.length !== 1 ? 's' : ''} selected`}
+                        </span>
+                      </div>
+                      <ChevronDown className="h-3 w-3 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-80 p-0" align="start">
+                    <Command>
+                      <CommandInput placeholder="Search tags..." className="h-9" />
+                      <CommandList>
+                        <CommandEmpty>No tags found.</CommandEmpty>
+                        
+                        {/* Content Tags Section */}
+                        {availableTags.filter(tag => !tag.startsWith('demographic:')).length > 0 && (
+                          <CommandGroup heading="Content Tags">
+                            {availableTags
+                              .filter(tag => !tag.startsWith('demographic:'))
+                              .slice(0, 15)
+                              .map((tag) => {
+                                const isSelected = searchTag.includes(tag)
+                                return (
+                                  <CommandItem
+                                    key={tag}
+                                    onSelect={() => {
+                                      const currentTags = searchTag.split(',').map(t => t.trim()).filter(t => t.length > 0)
+                                      if (isSelected) {
+                                        const newTags = currentTags.filter(t => t !== tag)
+                                        setSearchTag(newTags.join(', '))
+                                      } else {
+                                        const newTags = [...currentTags, tag]
+                                        setSearchTag(newTags.join(', '))
+                                      }
+                                    }}
+                                    className="flex items-center space-x-2 cursor-pointer"
+                                  >
+                                    <div className={`w-3 h-3 border rounded flex items-center justify-center ${
+                                      isSelected ? 'bg-blue-600 border-blue-600' : 'border-slate-300'
+                                    }`}>
+                                      {isSelected && <Check className="w-2 h-2 text-white" />}
+                                    </div>
+                                    <div className="flex items-center space-x-2 flex-1">
+                                      <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+                                      <span className="text-sm truncate">{tag}</span>
+                                    </div>
+                                  </CommandItem>
+                                )
+                              })}
+                          </CommandGroup>
+                        )}
+
+                        {/* Demographics Tags Section */}
+                        {availableTags.filter(tag => tag.startsWith('demographic:')).length > 0 && (
+                          <CommandGroup heading="Demographics">
+                            {availableTags
+                              .filter(tag => tag.startsWith('demographic:'))
+                              .slice(0, 15)
+                              .map((tag) => {
+                                const displayTag = tag.replace('demographic:', '')
+                                const isSelected = searchTag.includes(tag)
+                                return (
+                                  <CommandItem
+                                    key={tag}
+                                    onSelect={() => {
+                                      const currentTags = searchTag.split(',').map(t => t.trim()).filter(t => t.length > 0)
+                                      if (isSelected) {
+                                        const newTags = currentTags.filter(t => t !== tag)
+                                        setSearchTag(newTags.join(', '))
+                                      } else {
+                                        const newTags = [...currentTags, tag]
+                                        setSearchTag(newTags.join(', '))
+                                      }
+                                    }}
+                                    className="flex items-center space-x-2 cursor-pointer"
+                                  >
+                                    <div className={`w-3 h-3 border rounded flex items-center justify-center ${
+                                      isSelected ? 'bg-purple-600 border-purple-600' : 'border-slate-300'
+                                    }`}>
+                                      {isSelected && <Check className="w-2 h-2 text-white" />}
+                                    </div>
+                                    <div className="flex items-center space-x-2 flex-1">
+                                      <Users className="w-3 h-3 text-purple-500" />
+                                      <span className="text-sm truncate">{displayTag}</span>
+                                    </div>
+                                  </CommandItem>
+                                )
+                              })}
+                          </CommandGroup>
+                        )}
+
+                        {/* All Available Tags Section for fallback */}
+                        {availableTags.length === 0 && (
+                          <CommandGroup heading="No Tags Available">
+                            <div className="p-4 text-center text-sm text-slate-500">
+                              Upload documents with tags to enable filtering
+                            </div>
+                          </CommandGroup>
+                        )}
+                      </CommandList>
+                    </Command>
+                    
+                    {/* Selected Tags Display */}
+                    {searchTag.length > 0 && (
+                      <div className="border-t border-slate-200 p-3 bg-slate-50">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-sm font-medium text-slate-700">
+                            Selected Tags
+                          </span>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setSearchTag('')}
+                            className="h-6 px-2 text-xs text-slate-500 hover:text-slate-700"
+                          >
+                            Clear All
+                          </Button>
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {searchTag.split(',').map(t => t.trim()).filter(t => t.length > 0).map((tag, index) => (
+                            <Badge 
+                              key={index} 
+                              variant="secondary" 
+                              className={`text-xs ${
+                                tag.startsWith('demographic:') 
+                                  ? 'bg-purple-100 text-purple-700 border-purple-200' 
+                                  : 'bg-blue-100 text-blue-700 border-blue-200'
+                              }`}
+                            >
+                              {tag.startsWith('demographic:') ? (
+                                <>
+                                  <Users className="w-3 h-3 mr-1" />
+                                  {tag.replace('demographic:', '')}
+                                </>
+                              ) : (
+                                <>
+                                  <div className="w-2 h-2 bg-blue-500 rounded-full mr-1"></div>
+                                  {tag}
+                                </>
+                              )}
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </PopoverContent>
+                </Popover>
               </div>
 
               <div>
                 <label className="text-xs font-medium text-slate-600 mb-1 block">RAG Mode</label>
-                <Select value={keepContext} onValueChange={(value) => updateContextSettings(value, maxContext)}>
+                <Select value="AGENTIC" onValueChange={(value) => updateContextSettings("AGENTIC", maxContext)}>
                   <SelectTrigger className="bg-white border-slate-200 rounded-lg h-8 text-xs hover:border-slate-300 transition-colors">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="NO">Hybrid RAG</SelectItem>
-                    <SelectItem value="YES">Pure RAG</SelectItem>
                     <SelectItem value="AGENTIC">Agentic RAG</SelectItem>
                   </SelectContent>
                 </Select>
@@ -1914,7 +2243,6 @@ function VaultPageContent() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="NO">Standard</SelectItem>
                     <SelectItem value="YES">Maximum</SelectItem>
                   </SelectContent>
                 </Select>
@@ -1927,12 +2255,25 @@ function VaultPageContent() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {modelProviders.map((provider) => (
-                      <SelectItem key={provider.name} value={provider.name}>
-                        {provider.displayName}
-                        {provider.name === 'ollama' && provider.models.length > 0 && ' ✓'}
-                      </SelectItem>
-                    ))}
+                    {/* Show DeepSeek first, then other providers */}
+                    {modelProviders
+                      .sort((a, b) => {
+                        // DeepSeek first
+                        if (a.name === 'deepseek') return -1;
+                        if (b.name === 'deepseek') return 1;
+                        // Then Gemini
+                        if (a.name === 'gemini') return -1;
+                        if (b.name === 'gemini') return 1;
+                        // Then others alphabetically
+                        return a.displayName.localeCompare(b.displayName);
+                      })
+                      .map((provider) => (
+                        <SelectItem key={provider.name} value={provider.name}>
+                          {provider.displayName}
+                          {provider.name === 'deepseek' && ' 🧠'}
+                          {provider.name === 'ollama' && provider.models.length > 0 && ' ✓'}
+                        </SelectItem>
+                      ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -1960,6 +2301,7 @@ function VaultPageContent() {
                 </Select>
               </div>
             </div>
+
           </div>
 
           {/* Enhanced Chat Area with Mobile Responsive Design */}
@@ -2052,16 +2394,97 @@ function VaultPageContent() {
                           </div>
                         </div>
                       ) : (
-                        <div className={`prose prose-lg max-w-none ${message.type === "user" ? "text-white prose-invert" : ""}`}>
-                          {message.type === "user" ? (
-                            <p className="text-lg leading-relaxed">{message.content}</p>
+                        <div>
+                          {/* Inline Edit Controls for Curations - ADMIN ONLY */}
+                          {(message.type === "curation" || message.type === "summary") && user?.is_admin && (
+                            <div className="mb-4 flex items-center justify-between">
+                              <div className="flex items-center space-x-2">
+                                {inlineEditingMessageId === message.id ? (
+                                  <>
+                                    <Button
+                                      onClick={handleSaveInlineEdit}
+                                      disabled={isSavingInlineEdit}
+                                      size="sm"
+                                      className="bg-green-600 hover:bg-green-700 text-white"
+                                    >
+                                      {isSavingInlineEdit ? (
+                                        <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                                      ) : (
+                                        <Check className="w-4 h-4 mr-2" />
+                                      )}
+                                      Save Changes
+                                    </Button>
+                                    <Button
+                                      onClick={handleCancelInlineEdit}
+                                      disabled={isSavingInlineEdit}
+                                      size="sm"
+                                      variant="outline"
+                                    >
+                                      <X className="w-4 h-4 mr-2" />
+                                      Cancel
+                                    </Button>
+                                  </>
+                                ) : (
+                                  <Button
+                                    onClick={() => handleStartInlineEdit(message)}
+                                    size="sm"
+                                    variant="outline"
+                                    className="bg-blue-50 hover:bg-blue-100 text-blue-700 border-blue-200"
+                                  >
+                                    <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                    </svg>
+                                    Edit Content
+                                  </Button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Content Display/Edit Area */}
+                          {inlineEditingMessageId === message.id ? (
+                            <div className="space-y-4">
+                              {/* Title Editor */}
+                              {message.title && (
+                                <div>
+                                  <Label className="text-sm font-medium text-slate-700 mb-2 block">Title</Label>
+                                  <Input
+                                    value={editedTitle}
+                                    onChange={(e) => setEditedTitle(e.target.value)}
+                                    className="text-lg font-semibold"
+                                    placeholder="Enter title..."
+                                  />
+                                </div>
+                              )}
+                              
+                              {/* Content Editor */}
+                              <div>
+                                <Label className="text-sm font-medium text-slate-700 mb-2 block">Content</Label>
+                                <Textarea
+                                  value={editedContent}
+                                  onChange={(e) => setEditedContent(e.target.value)}
+                                  rows={15}
+                                  className="text-base leading-relaxed font-mono"
+                                  placeholder="Enter your content here..."
+                                />
+                                <p className="text-xs text-slate-500 mt-2">
+                                  You can edit the AI-generated content and add your own insights and analysis.
+                                </p>
+                              </div>
+                            </div>
                           ) : (
-                            <div
-                              className="text-base leading-relaxed enterprise-content"
-                              dangerouslySetInnerHTML={{
-                                __html: formatContent(message.content),
-                              }}
-                            />
+                            <div className={`prose prose-lg max-w-none ${message.type === "user" ? "text-white prose-invert" : ""}`}>
+                              {message.type === "user" ? (
+                                <p className="text-lg leading-relaxed">{message.content}</p>
+                              ) : (
+                                <div
+                                  className="text-base leading-relaxed enterprise-content"
+                                  dangerouslySetInnerHTML={{
+                                    __html: formatContent(message.content),
+                                  }}
+                                />
+                              )}
+                            </div>
                           )}
                         </div>
                       )}
@@ -2238,6 +2661,92 @@ function VaultPageContent() {
       data={emailShare.currentData!}
       onSend={emailShare.handleSendEmail}
     />
+
+    {/* AI Curation Editor Modal */}
+    {showCurationEditor && editingCuration && (
+      <AICurationEditor
+        curationId={editingCuration.id}
+        initialContent={editingCuration.content}
+        initialTitle={editingCuration.title}
+        initialDescription={editingCuration.description}
+        isOpen={showCurationEditor}
+        onClose={() => {
+          setShowCurationEditor(false)
+          setEditingCuration(null)
+        }}
+        onSave={async (content, title, description) => {
+          try {
+            // Update the curation in the chat messages
+            const updatedMessages = chatMessages.map(msg => {
+              if (msg.type === "curation" && msg.title === editingCuration.title) {
+                return {
+                  ...msg,
+                  content,
+                  title,
+                  timestamp: new Date().toISOString()
+                }
+              }
+              return msg
+            })
+            
+            dispatch({ type: 'SET_CHAT_MESSAGES', payload: updatedMessages })
+            
+            // Update the curation in the curations list
+            const updatedCustomCurations = customCurations.map(curation => {
+              if (curation.id === editingCuration.id) {
+                return {
+                  ...curation,
+                  title: title || curation.title
+                }
+              }
+              return curation
+            })
+            
+            const updatedDynamicCurations = dynamicCurations.map(curation => {
+              if (curation.id === editingCuration.id) {
+                return {
+                  ...curation,
+                  title: title || curation.title
+                }
+              }
+              return curation
+            })
+            
+            dispatch({ type: 'SET_CUSTOM_CURATIONS', payload: updatedCustomCurations })
+            dispatch({ type: 'SET_DYNAMIC_CURATIONS', payload: updatedDynamicCurations })
+            
+            // Show success message
+            const successMessage = {
+              id: Date.now(),
+              type: "ai" as const,
+              content: `✅ Successfully updated "${title}". Your changes have been saved permanently.`,
+              timestamp: new Date().toISOString(),
+              themes: ["System", "Success", "Edit"]
+            }
+            
+            dispatch({ type: 'ADD_CHAT_MESSAGE', payload: successMessage })
+            
+            // Close the editor
+            setShowCurationEditor(false)
+            setEditingCuration(null)
+            
+          } catch (error) {
+            console.error('Failed to save curation changes:', error)
+            
+            // Show error message
+            const errorMessage = {
+              id: Date.now(),
+              type: "ai" as const,
+              content: `❌ Failed to save changes to "${title}". Please try again.`,
+              timestamp: new Date().toISOString(),
+              themes: ["System", "Error", "Edit"]
+            }
+            
+            dispatch({ type: 'ADD_CHAT_MESSAGE', payload: errorMessage })
+          }
+        }}
+      />
+    )}
     </>
   )
 }

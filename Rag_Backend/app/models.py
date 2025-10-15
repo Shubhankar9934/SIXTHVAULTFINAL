@@ -52,6 +52,13 @@ class AICuration(SQLModel, table=True):
     provider_used: Optional[str] = None  # Track which AI provider was used
     model_used: Optional[str] = None  # Track which model was used
     curation_type: Optional[str] = None  # executive_summary, market_analysis, business_intelligence, recommendations, custom
+    is_public: bool = Field(default=False)  # Add missing is_public field with default value
+    created_by_admin: bool = Field(default=False)  # Add missing created_by_admin field with default value
+    
+    # Admin sharing functionality
+    shared_with_account: bool = Field(default=False)  # Whether admin has shared this with account users
+    shared_at: Optional[dt.datetime] = None  # When curation was shared
+    shared_by: Optional[str] = None  # Admin user ID who shared the curation
 
 class CurationSettings(SQLModel, table=True):
     __tablename__ = "curation_settings"
@@ -267,3 +274,45 @@ class ProcessingDocument(SQLModel, table=True):
     # Control flags
     cancellation_requested: bool = Field(default=False)
     cleanup_completed: bool = Field(default=False)
+
+# Transcript Analysis Models
+class TranscriptAnalysis(SQLModel, table=True):
+    __tablename__ = "transcript_analyses"
+    
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    owner_id: str = Field(foreign_key="users.id", index=True)
+    tenant_id: Optional[str] = Field(foreign_key="tenants.id")  # Add tenant isolation
+    
+    # Analysis metadata
+    title: str = Field(default="Transcript Analysis")
+    document_id: Optional[str] = Field(foreign_key="documents.id")  # Link to source document if applicable
+    source_type: str = Field(default="manual")  # manual, document, upload
+    
+    # Extracted information
+    company_name: Optional[str] = None
+    overall_sentiment: Optional[str] = None
+    agreement_to_share: Optional[bool] = None
+    
+    # Structured content (stored as JSON)
+    satisfaction_reasons: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    improvement_areas: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    issues_and_stories: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    
+    # Raw content
+    raw_transcript: Optional[str] = None
+    analysis_content: Optional[str] = None  # Full formatted analysis
+    
+    # Processing metadata
+    provider_used: Optional[str] = None
+    model_used: Optional[str] = None
+    processing_time_ms: Optional[int] = None
+    confidence_score: Optional[float] = None
+    
+    # Timestamps
+    created_at: dt.datetime = Field(default_factory=dt.datetime.utcnow)
+    updated_at: dt.datetime = Field(default_factory=dt.datetime.utcnow)
+    
+    # Status and flags
+    status: str = Field(default="completed")  # processing, completed, error
+    is_archived: bool = Field(default=False)
+    tags: List[str] = Field(default_factory=list, sa_column=Column(JSON))

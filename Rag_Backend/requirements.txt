@@ -74,6 +74,7 @@ ollama==0.5.1
 onnx==1.18.0
 onnxruntime==1.22.0
 openai==1.91.0
+openpyxl==3.1.2
 packaging==25.0
 pandas==2.3.0
 passlib==1.7.4

@@ -18,6 +18,8 @@ export interface DocumentData {
   sentiment?: string
   readingLevel?: string
   keyInsights?: string[]
+  tags?: string[]
+  demo_tags?: string[]
 }
 
 export interface ProcessingDocument {
@@ -92,7 +94,9 @@ class DocumentStore {
       mainTopics: doc.mainTopics || doc.themes || [], // Use mainTopics from backend, fallback to themes
       sentiment: doc.sentiment || "neutral",
       readingLevel: doc.readingLevel || "intermediate",
-      keyInsights: keyInsights
+      keyInsights: keyInsights,
+      tags: (doc as any).tags || [], // Add support for content tags
+      demo_tags: (doc as any).demo_tags || (doc as any).demoTags || [] // Add support for demographics tags
     }
   }
 

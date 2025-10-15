@@ -18,6 +18,11 @@ class QueryIn(BaseModel):
     save_conversation: bool = True  # Whether to save this query as a conversation
     mode: Optional[str] = "standard"  # RAG mode - "standard", "hybrid", "agentic", "crewai"
     
+    # Tags filtering for enhanced context
+    selected_tags: Optional[List[str]] = None  # Content and demographic tags selected by user
+    content_tags: Optional[List[str]] = None  # Specific content tags filter
+    demographic_tags: Optional[List[str]] = None  # Specific demographic tags filter
+    
     # Agentic RAG specific settings
     agentic_config: Optional[dict] = None  # Configuration for agentic mode
     
@@ -56,7 +61,10 @@ async def query(
             document_ids=body.document_ids,
             selected_model=body.model,
             execution_mode=body.execution_mode or "sequential",
-            crew_type=body.crew_type or "standard"
+            crew_type=body.crew_type or "standard",
+            selected_tags=body.selected_tags,
+            content_tags=body.content_tags,
+            demographic_tags=body.demographic_tags
         )
         
     elif rag_mode == "agentic":
@@ -81,7 +89,10 @@ async def query(
             max_context=max_context,
             document_ids=body.document_ids,
             selected_model=body.model,
-            agentic_config=agentic_config
+            agentic_config=agentic_config,
+            selected_tags=body.selected_tags,
+            content_tags=body.content_tags,
+            demographic_tags=body.demographic_tags
         )
         
     else:
@@ -95,7 +106,10 @@ async def query(
             selected_provider,  # Use user-selected provider
             max_context,
             document_ids=body.document_ids,
-            selected_model=body.model  # Pass selected model
+            selected_model=body.model,  # Pass selected model
+            selected_tags=body.selected_tags,
+            content_tags=body.content_tags,
+            demographic_tags=body.demographic_tags
         )
     
     response_time_ms = int((time.time() - start_time) * 1000)

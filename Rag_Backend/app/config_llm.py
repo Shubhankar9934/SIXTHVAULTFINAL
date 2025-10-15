@@ -29,7 +29,7 @@ LLM_CONFIGS: Dict[str, Dict[str, LLMConfig]] = {
             supports_large_context=True,  # Now supports unlimited context
             recommended_for="NEVER-FAIL fast responses, unlimited input/output"
         ),
-        "llama3-8b-8192": LLMConfig(
+        "llama-3.1-8b-instant": LLMConfig(
             max_context_tokens=999999,  # UNLIMITED - Never fail on input size
             max_response_tokens=999999,  # UNLIMITED - Never fail on output size
             rate_limit_per_minute=30000,
@@ -99,13 +99,29 @@ LLM_CONFIGS: Dict[str, Dict[str, LLMConfig]] = {
         ),
     },
     "deepseek": {
+        "deepseek-reasoner": LLMConfig(
+            max_context_tokens=64000,
+            max_response_tokens=8192,  # Increased for V3.2-Exp maximum output
+            rate_limit_per_minute=10000,
+            cost_per_1k_tokens=0.14,
+            supports_large_context=True,
+            recommended_for="Advanced reasoning with thinking mode, complex analysis"
+        ),
         "deepseek-chat": LLMConfig(
             max_context_tokens=64000,
             max_response_tokens=4000,
             rate_limit_per_minute=10000,
             cost_per_1k_tokens=0.14,
             supports_large_context=True,
-            recommended_for="Large contexts, coding tasks"
+            recommended_for="Large contexts, coding tasks, fast responses"
+        ),
+        "deepseek-v3.1-terminus": LLMConfig(
+            max_context_tokens=64000,
+            max_response_tokens=4000,
+            rate_limit_per_minute=10000,
+            cost_per_1k_tokens=0.14,
+            supports_large_context=True,
+            recommended_for="Legacy model, fallback option"
         ),
     },
 }
@@ -127,7 +143,7 @@ class ContextStrategy:
         """
         # For small contexts, use Groq for speed
         if context_tokens <= 8000:
-            return ("groq", "llama3-8b-8192")
+            return ("groq", "llama-3.1-8b-instant")
         # For medium contexts, use Groq with larger model
         elif context_tokens <= 32000:
             return ("groq", "mixtral-8x7b-32768")
@@ -210,7 +226,7 @@ def get_recommended_settings(
     if speed_priority and available_providers["groq"]:
         # Prioritize Groq for speed
         if adjusted_tokens <= 8000:
-            provider, model = "groq", "llama3-8b-8192"
+            provider, model = "groq", "llama-3.1-8b-instant"
         elif adjusted_tokens <= 25000:
             provider, model = "groq", "mixtral-8x7b-32768"
         else:
@@ -269,7 +285,7 @@ USAGE_EXAMPLES = {
         "description": "Small document (< 10k tokens)",
         "recommended_settings": {
             "provider": "groq",
-            "model": "llama3-8b-8192",
+            "model": "llama-3.1-8b-instant",
             "max_context": False
         }
     },

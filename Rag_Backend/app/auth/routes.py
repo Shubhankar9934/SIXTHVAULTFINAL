@@ -390,16 +390,30 @@ async def verify_email(request: Request, db: Session = Depends(get_session)):
 @router.post("/resend-verification", response_model=dict)
 async def resend_verification(request: Request, db: Session = Depends(get_session)):
     """Resend verification code"""
+    email = ""
+    
     try:
-        # Parse JSON body from request
-        body = await request.json()
-        email = body.get("email", "").lower().strip()
+        # First try to get email from query parameters (frontend sends it this way)
+        email = request.query_params.get("email", "").lower().strip()
+        
+        # If not in query params, try JSON body as fallback
+        if not email:
+            try:
+                body = await request.json()
+                email = body.get("email", "").lower().strip()
+            except:
+                pass  # Ignore JSON parsing errors if no body
         
         if not email:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email is required"
             )
+            
+        print(f"Resend verification request for email: {email}")
+        
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Resend verification failed - Request parsing error: {e}")
         raise HTTPException(

@@ -178,11 +178,11 @@ const initialState: VaultState = {
     expandedRelevance: new Set()
   },
   settings: {
-    selectedProvider: 'gemini',
-    selectedModel: 'gemini-1.5-flash',
+    selectedProvider: 'deepseek',
+    selectedModel: 'deepseek-reasoner',
     availableModels: [],
     modelProviders: [],
-    keepContext: 'NO',
+    keepContext: 'AGENTIC',
     maxContext: 'YES',
     searchTag: ''
   },
@@ -608,11 +608,27 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
     // Set all summaries without limiting to 4
     dispatch({ type: 'SET_DYNAMIC_SUMMARIES', payload: summaries })
 
-    // Update available tags
+    // Update available tags - Include both content tags and demographics
     const allTags = new Set<string>()
     docs.forEach((doc) => {
+      // Add content tags (themes and keywords)
       doc.themes?.forEach((theme: string) => allTags.add(theme))
       doc.keywords?.forEach((keyword: string) => allTags.add(keyword))
+      
+      // Add document tags if available
+      if (doc.tags && Array.isArray(doc.tags)) {
+        doc.tags.forEach((tag: string) => allTags.add(tag))
+      }
+      
+      // Add demographics tags with a prefix to distinguish them
+      if (doc.demo_tags && Array.isArray(doc.demo_tags)) {
+        doc.demo_tags.forEach((demoTag: string) => allTags.add(`demographic:${demoTag}`))
+      }
+      
+      // Also add demographics tags if they exist under different property names
+      if (doc.demographics && Array.isArray(doc.demographics)) {
+        doc.demographics.forEach((demoTag: string) => allTags.add(`demographic:${demoTag}`))
+      }
     })
     dispatch({ type: 'SET_AVAILABLE_TAGS', payload: Array.from(allTags) })
   }, [])
@@ -1474,16 +1490,57 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
         dispatch({ type: 'UPDATE_PERFORMANCE', payload: { cacheHits: state.performance.cacheHits + 1 } })
       }
 
-      const curations = await ragApiClient.getAICurations()
-      dispatch({ type: 'SET_CURATIONS', payload: curations })
-      cacheManager.set(CacheKeys.curations(), curations, 30 * 60 * 1000)
+      // Load both user's own curations and shared admin curations
+      const [userCurations, sharedAdminCurations] = await Promise.allSettled([
+        ragApiClient.getAICurations(),
+        ragApiClient.getSharedAdminCurations()
+      ])
+
+      let allCurations: AICuration[] = []
+
+      // Add user's own curations
+      if (userCurations.status === 'fulfilled') {
+        allCurations = [...userCurations.value]
+        console.log(`✅ VaultState: Loaded ${userCurations.value.length} user curations`)
+      } else {
+        console.error('❌ VaultState: Failed to load user curations:', userCurations.reason)
+      }
+
+      // Add shared admin curations (but filter out duplicates)
+      if (sharedAdminCurations.status === 'fulfilled' && sharedAdminCurations.value.length > 0) {
+        // FIXED: Filter out shared curations that are already in user's own curations to prevent duplicates
+        const userCurationIds = new Set(allCurations.map(c => c.id))
+        const uniqueSharedCurations = sharedAdminCurations.value.filter(curation => 
+          !userCurationIds.has(curation.id)
+        )
+        
+        if (uniqueSharedCurations.length > 0) {
+          // Mark shared curations to distinguish them
+          const markedSharedCurations = uniqueSharedCurations.map(curation => ({
+            ...curation,
+            isSharedFromAdmin: true,
+            title: `👑 ${curation.title}` // Add crown emoji to indicate admin-shared content
+          }))
+          allCurations = [...allCurations, ...markedSharedCurations]
+          console.log(`✅ VaultState: Loaded ${uniqueSharedCurations.length} unique admin-shared curations (filtered out ${sharedAdminCurations.value.length - uniqueSharedCurations.length} duplicates)`)
+        } else {
+          console.log(`🔍 VaultState: All ${sharedAdminCurations.value.length} admin-shared curations were duplicates of user's own curations - filtered out`)
+        }
+      } else if (sharedAdminCurations.status === 'rejected') {
+        console.log('🔍 VaultState: No admin-shared curations available or error fetching:', sharedAdminCurations.reason)
+      } else {
+        console.log('🔍 VaultState: No admin-shared curations available for this user')
+      }
+
+      dispatch({ type: 'SET_CURATIONS', payload: allCurations })
+      cacheManager.set(CacheKeys.curations(), allCurations, 30 * 60 * 1000)
 
       // Only update custom curations from API, preserve document-based dynamic curations
-      const { custom } = separateCurationsByType(curations)
+      const { custom } = separateCurationsByType(allCurations)
       dispatch({ type: 'SET_CUSTOM_CURATIONS', payload: custom })
       
       // Don't override dynamic curations here - they are managed by generateDynamicCurationsAndSummaries
-      console.log(`✅ VaultState: Loaded ${custom.length} custom curations, preserved document-based dynamic curations`)
+      console.log(`✅ VaultState: Loaded ${custom.length} total curations (user + admin-shared), preserved document-based dynamic curations`)
 
     } catch (error) {
       console.error('Failed to load curations:', error)
@@ -2197,7 +2254,9 @@ export function VaultStateProvider({ children }: { children: React.ReactNode }) 
         provider: state.settings.selectedProvider,
         model: state.settings.selectedModel,
         maxContext: state.settings.maxContext === 'YES',
-        documentIds: state.documents.selectedFiles,
+        documentIds: state.documents.selectedFiles.length > 0 
+          ? state.documents.selectedFiles 
+          : state.documents.data.map(doc => doc.id), // FIXED: Pass ALL document IDs when no specific selection
         conversationId: state.conversations.currentConversationId || undefined,
         saveConversation: true,
         hybrid: hybrid,

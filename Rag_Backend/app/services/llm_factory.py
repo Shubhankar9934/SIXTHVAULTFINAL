@@ -97,37 +97,49 @@ class ProviderConfig:
 
 @dataclass
 class NeverFailLLMConfig:
-    # Provider hierarchy (priority order) - Bedrock first for Claude 3 Haiku
+    # Provider hierarchy (priority order) - AWS BEDROCK FIRST to avoid Gemini safety filter issues
     providers: Dict[str, ProviderConfig] = field(default_factory=lambda: {
         "bedrock": ProviderConfig(
             name="bedrock",
             type=ProviderType.BEDROCK,
-            priority=0,  # HIGHEST PRIORITY - Primary provider
-            max_failures=2,  # Allow few failures before fallback
-            recovery_time=30,  # Quick recovery
+            priority=0,  # HIGHEST PRIORITY - AWS Bedrock FIRST to avoid Gemini safety issues
+            max_failures=999,  # Never give up on Bedrock
+            recovery_time=1,  # Instant recovery
             timeout=None,  # NO TIMEOUT - Bedrock handles this internally
             max_tokens=4096,  # Claude 3 Haiku max output
             temperature=0.1,
             enabled=settings.bedrock_enabled,  # Controlled by config
             models=["anthropic.claude-3-haiku-20240307-v1:0"]
         ),
+        "deepseek": ProviderConfig(
+            name="deepseek",
+            type=ProviderType.DEEPSEEK,
+            priority=1,  # Second priority - fallback from Bedrock
+            max_failures=1,  # Fast fallback to groq
+            recovery_time=5,  # Quick recovery
+            timeout=None,  # NO TIMEOUT - Wait indefinitely
+            max_tokens=8192,  # Updated for V3.2-Exp maximum output
+            temperature=0.1,
+            enabled=settings.deepseek_enabled,  # Controlled by configuration
+            models=["deepseek-reasoner", "deepseek-chat", "deepseek-v3.1-terminus"]  # V3.2-Exp with thinking mode as default
+        ),
         "groq": ProviderConfig(
             name="groq",
             type=ProviderType.GROQ,
-            priority=1,  # Second priority after Bedrock
-            max_failures=1,  # Faster recovery
+            priority=2,  # Third priority - fallback from DeepSeek
+            max_failures=1,  # Fast fallback to openai
             recovery_time=5,  # Quick recovery
             timeout=None,  # NO TIMEOUT - Wait indefinitely
             max_tokens=4096,  # Increased for better responses
             temperature=0.1,
             enabled=settings.groq_enabled,  # Controlled by configuration
-            models=["llama3-8b-8192", "mixtral-8x7b-32768"]
+            models=["llama-3.1-8b-instant", "mixtral-8x7b-32768"]
         ),
         "openai": ProviderConfig(
             name="openai",
             type=ProviderType.OPENAI,
-            priority=2,  # Third priority
-            max_failures=1,  # Faster recovery
+            priority=3,  # Fourth priority - fallback from Groq
+            max_failures=1,  # Fast fallback to disabled gemini
             recovery_time=5,  # Quick recovery
             timeout=None,  # NO TIMEOUT - Wait indefinitely
             max_tokens=4096,  # Increased for better responses
@@ -135,29 +147,17 @@ class NeverFailLLMConfig:
             enabled=settings.openai_enabled,  # Controlled by configuration
             models=["gpt-3.5-turbo", "gpt-4o-mini"]
         ),
-        "deepseek": ProviderConfig(
-            name="deepseek",
-            type=ProviderType.DEEPSEEK,
-            priority=3,  # Fourth priority
-            max_failures=1,  # Faster recovery
-            recovery_time=5,  # Quick recovery
-            timeout=None,  # NO TIMEOUT - Wait indefinitely
-            max_tokens=4096,  # Increased for better responses
-            temperature=0.1,
-            enabled=settings.deepseek_enabled,  # Controlled by configuration
-            models=["deepseek-chat"]
-        ),
         "gemini": ProviderConfig(
             name="gemini",
             type=ProviderType.GEMINI,
-            priority=4,  # Fifth priority
-            max_failures=1,  # Faster recovery
-            recovery_time=5,  # Quick recovery
+            priority=4,  # LOWEST PRIORITY - Last resort due to safety filter issues
+            max_failures=1,  # Fast circuit breaker opening
+            recovery_time=300,  # 5 minute recovery time to avoid repeated failures
             timeout=None,  # NO TIMEOUT - Wait indefinitely
             max_tokens=4096,  # Increased for better responses
             temperature=0.1,
-            enabled=settings.gemini_enabled,  # Controlled by configuration
-            models=["gemini-1.5-flash", "gemini-1.5-pro"]
+            enabled=False,  # DISABLED BY DEFAULT - Too many safety filter issues
+            models=["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"]
         )
     })
     
@@ -225,6 +225,14 @@ class ProviderCircuitBreaker:
         elif self.state == ProviderState.FAILED:
             self.state = ProviderState.RECOVERING
             print(f"🔄 {self.provider_name} starting recovery")
+    
+    def force_reset(self):
+        """Force reset the circuit breaker to healthy state"""
+        self.state = ProviderState.HEALTHY
+        self.failure_count = 0
+        self.consecutive_successes = 0
+        self.last_failure_time = None
+        print(f"🔄 {self.provider_name} circuit breaker FORCE RESET to healthy state")
     
     def record_failure(self):
         self.failure_count += 1
@@ -319,7 +327,7 @@ class NeverFailGroqClient:
         self.client = None
         self.model_limits = {
             "llama3-70b-8192": {"context": 8192, "response": 2048},
-            "llama3-8b-8192": {"context": 8192, "response": 2048},
+            "llama-3.1-8b-instant": {"context": 8192, "response": 2048},
             "mixtral-8x7b-32768": {"context": 32768, "response": 4096},
             "gemma-7b-it": {"context": 8192, "response": 2048}
         }
@@ -608,19 +616,82 @@ class NeverFailGeminiClient:
             await self.initialize()
         
         try:
-            # Create model instance
-            model_instance = genai.GenerativeModel(model)
+            # Handle model name variations for Gemini API compatibility
+            # Try multiple model name formats to find one that works
+            possible_models = []
+            
+            if model == "gemini-1.5-flash":
+                possible_models = [
+                    "gemini-2.5-flash",          # Latest 2.5 Flash model
+                    "gemini-2.5-flash-latest",   # Latest 2.5 version
+                    "gemini-1.5-flash-latest",   # Fallback to 1.5 latest
+                    "gemini-1.5-flash",          # Original 1.5 name
+                    "gemini-pro"                  # Ultimate fallback
+                ]
+            elif model == "gemini-1.5-pro":
+                possible_models = [
+                    "gemini-2.5-pro",            # Latest 2.5 Pro model
+                    "gemini-2.5-pro-latest",     # Latest 2.5 version
+                    "gemini-1.5-pro-latest",     # Fallback to 1.5 latest
+                    "gemini-1.5-pro",            # Original 1.5 name
+                    "gemini-pro"                  # Ultimate fallback
+                ]
+            elif model == "gemini-pro":
+                possible_models = ["gemini-pro"]
+            else:
+                # For unknown models, try as-is then fallback to gemini-pro
+                possible_models = [model, "gemini-pro"]
+            
+            # Try each model name until one works
+            model_instance = None
+            api_model = None
+            last_error = None
+            
+            for candidate_model in possible_models:
+                try:
+                    print(f"🔧 Gemini: Attempting to use model: {candidate_model}")
+                    model_instance = genai.GenerativeModel(candidate_model)
+                    api_model = candidate_model
+                    print(f"✅ Gemini: Successfully initialized model: {candidate_model}")
+                    break
+                except Exception as e:
+                    print(f"⚠️ Gemini: Model {candidate_model} failed: {e}")
+                    last_error = e
+                    continue
+            
+            if not model_instance:
+                raise Exception(f"All Gemini model attempts failed. Last error: {last_error}")
             
             # Prepare the full prompt
             full_prompt = prompt
             if system:
                 full_prompt = f"System: {system}\n\nUser: {prompt}"
             
-            # Configure generation parameters
+            # Configure generation parameters with safety settings
             generation_config = genai.types.GenerationConfig(
                 max_output_tokens=max_tokens or 2048,
                 temperature=temperature or 0.1,
             )
+            
+            # Configure safety settings to be more permissive for business use
+            safety_settings = [
+                {
+                    "category": "HARM_CATEGORY_HARASSMENT",
+                    "threshold": "BLOCK_NONE"
+                },
+                {
+                    "category": "HARM_CATEGORY_HATE_SPEECH", 
+                    "threshold": "BLOCK_NONE"
+                },
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_NONE"
+                },
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "BLOCK_NONE"
+                }
+            ]
             
             if stream:
                 # Handle streaming response
@@ -633,9 +704,28 @@ class NeverFailGeminiClient:
                         response = model_instance.generate_content(
                             full_prompt,
                             generation_config=generation_config,
+                            safety_settings=safety_settings,
                             stream=True
                         )
-                        return list(response)
+                        
+                        chunks = []
+                        try:
+                            for chunk in response:
+                                # Check if chunk was blocked by safety filters
+                                if hasattr(chunk, 'candidates') and chunk.candidates:
+                                    candidate = chunk.candidates[0]
+                                    if hasattr(candidate, 'finish_reason') and candidate.finish_reason in [2, 3, 4, 5]:
+                                        # Response was blocked, raise error for fallback
+                                        raise Exception(f"Gemini streaming response blocked by safety filters (finish_reason: {candidate.finish_reason})")
+                                chunks.append(chunk)
+                            return chunks
+                        except Exception as e:
+                            if "safety filters" in str(e):
+                                raise e
+                            # For other streaming errors, try to return what we have
+                            if chunks:
+                                return chunks
+                            raise e
                     
                     # Execute in thread pool to avoid blocking
                     loop = asyncio.get_event_loop()
@@ -655,9 +745,45 @@ class NeverFailGeminiClient:
                 def generate_sync():
                     response = model_instance.generate_content(
                         full_prompt,
-                        generation_config=generation_config
+                        generation_config=generation_config,
+                        safety_settings=safety_settings
                     )
-                    return response.text
+                    
+                    # Handle blocked responses gracefully
+                    if hasattr(response, 'candidates') and response.candidates:
+                        candidate = response.candidates[0]
+                        if hasattr(candidate, 'finish_reason'):
+                            # Check if response was blocked
+                            if candidate.finish_reason in [2, 3, 4, 5]:  # SAFETY, RECITATION, OTHER safety reasons
+                                # Try to get partial content if available
+                                if hasattr(candidate, 'content') and candidate.content.parts:
+                                    partial_text = ""
+                                    for part in candidate.content.parts:
+                                        if hasattr(part, 'text') and part.text:
+                                            partial_text += part.text
+                                    if partial_text.strip():
+                                        return partial_text
+                                
+                                # If no partial content, raise a specific error
+                                raise Exception(f"Gemini response blocked by safety filters (finish_reason: {candidate.finish_reason})")
+                    
+                    # Try to get the response text normally
+                    try:
+                        return response.text
+                    except Exception as e:
+                        # If response.text fails, try alternative methods
+                        if hasattr(response, 'candidates') and response.candidates:
+                            candidate = response.candidates[0]
+                            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                                text_parts = []
+                                for part in candidate.content.parts:
+                                    if hasattr(part, 'text'):
+                                        text_parts.append(part.text)
+                                if text_parts:
+                                    return ''.join(text_parts)
+                        
+                        # If all else fails, raise the original error
+                        raise e
                 
                 # Execute in thread pool to avoid blocking the event loop
                 loop = asyncio.get_event_loop()
@@ -869,7 +995,7 @@ def get_fallback_model_for_provider(provider: str) -> str:
     # Provider-specific fallbacks
     fallback_models = {
         "bedrock": "anthropic.claude-3-haiku-20240307-v1:0",
-        "groq": "llama3-8b-8192", 
+        "groq": "llama-3.1-8b-instant",
         "openai": "gpt-3.5-turbo",
         "gemini": "gemini-1.5-flash",
         "deepseek": "deepseek-chat"
@@ -901,47 +1027,60 @@ class NeverFailLLM:
         temperature: float = None,
         stream: bool = False
     ) -> Union[str, AsyncGenerator[str, None]]:
-        """Never-fail chat interface with smart model-to-provider routing"""
+        """FRONTEND-FIRST Never-fail chat - RESPECTS frontend provider/model selection FIRST"""
         start_time = time.time()
         self.stats["requests"] += 1
         
-        # CRITICAL FIX: Smart model-to-provider routing
-        if self.model:
-            # If a specific model is requested, route to the correct provider
-            correct_provider = get_provider_for_model(self.model)
-            print(f"🎯 Smart routing: Model '{self.model}' → Provider '{correct_provider}'")
-            
-            # Validate the model-provider combination
-            if validate_model_provider_combination(self.model, correct_provider):
-                # Try the correct provider first
-                available_providers = [correct_provider]
-                model_to_use = self.model
-            else:
-                # Model not available on correct provider, use fallback
-                print(f"⚠️ Model '{self.model}' not available on '{correct_provider}', using fallback")
-                available_providers = [correct_provider]
-                model_to_use = get_fallback_model_for_provider(correct_provider)
-        else:
-            # No specific model requested, use preferred provider
-            available_providers = health_monitor.get_available_providers()
-            
-            # Ensure preferred provider is tried first if available
-            if self.preferred_provider in available_providers:
-                available_providers.remove(self.preferred_provider)
-                available_providers.insert(0, self.preferred_provider)
-            
-            model_to_use = None
+        # 🎯 CRITICAL: RESPECT FRONTEND SELECTION AS PRIMARY PROVIDER
+        print(f"🎯 FRONTEND SELECTION: Provider='{self.preferred_provider}', Model='{self.model}'")
         
-        # Add fallback providers for resilience
-        all_available = health_monitor.get_available_providers()
-        for provider in all_available:
+        # STEP 1: Try frontend-selected provider/model FIRST (if specified)
+        if self.preferred_provider and self.preferred_provider != "bedrock":
+            # Frontend explicitly selected a provider - HONOR IT FIRST
+            primary_providers = [self.preferred_provider]
+            print(f"✅ FRONTEND PRIORITY: Using '{self.preferred_provider}' as PRIMARY provider")
+        else:
+            # No specific frontend selection, use default priority
+            primary_providers = ["bedrock"]  # Default to bedrock
+            print(f"⚙️ DEFAULT PRIORITY: Using 'bedrock' as default provider")
+        
+        # STEP 2: Set up the model to use with frontend selection
+        if self.model:
+            # Frontend specified a model - use it with the selected provider
+            model_to_use = self.model
+            print(f"📋 FRONTEND MODEL: Using '{self.model}' as requested")
+        else:
+            # No model specified, use provider's default model
+            model_to_use = None
+            print(f"📋 DEFAULT MODEL: Using provider's default model")
+        
+        # STEP 3: Build complete provider chain (frontend first, then fallbacks)
+        available_providers = []
+        
+        # Add frontend-selected provider first (if valid and enabled)
+        for provider_name in primary_providers:
+            provider_config = config.providers.get(provider_name)
+            if provider_config and provider_config.enabled:
+                circuit_breaker = health_monitor.get_circuit_breaker(provider_name)
+                if circuit_breaker.can_execute():
+                    available_providers.append(provider_name)
+                    print(f"✅ PRIMARY: '{provider_name}' added as primary provider")
+                else:
+                    print(f"⚠️ PRIMARY: '{provider_name}' circuit breaker open, will try fallbacks")
+            else:
+                print(f"❌ PRIMARY: '{provider_name}' not enabled or configured")
+        
+        # Add fallback providers (in priority order, excluding primary)
+        fallback_providers = health_monitor.get_available_providers()
+        for provider in fallback_providers:
             if provider not in available_providers:
                 available_providers.append(provider)
+                print(f"🔄 FALLBACK: '{provider}' added to fallback chain")
         
+        # STEP 4: Emergency fallback if all circuit breakers are open
         if not available_providers:
-            # Emergency fallback - try all providers regardless of circuit breaker state
-            available_providers = ["bedrock", "groq", "openai", "gemini", "deepseek"]
-            print("🚨 EMERGENCY MODE: All circuit breakers open, trying all providers")
+            available_providers = ["bedrock", "deepseek", "groq", "openai", "gemini"]
+            print("🚨 EMERGENCY: All circuit breakers open, trying all providers")
         
         last_error = None
         
@@ -956,12 +1095,12 @@ class NeverFailLLM:
                 print(f"🔄 Trying provider: {provider_name}")
                 
                 # Select appropriate model for this provider
-                if model_to_use:
-                    # Use the specified model
+                if model_to_use and provider_name == available_providers[0]:
+                    # Use the specified model only for the first (correct) provider
                     final_model = model_to_use
                 else:
-                    # Use default model for this provider
-                    final_model = provider_config.models[0] if provider_config.models else "default"
+                    # For fallback providers, use their native models
+                    final_model = get_fallback_model_for_provider(provider_name)
                 
                 print(f"📋 Using model: {final_model}")
                 
@@ -1087,7 +1226,7 @@ class NeverFailLLM:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def get_llm(provider: str = "bedrock", model: str = None) -> NeverFailLLM:
-    """Get never-fail LLM instance with automatic fallback"""
+    """Get never-fail LLM instance with automatic fallback - Bedrock first to avoid Gemini safety issues"""
     return NeverFailLLM(provider, model)
 
 async def smart_chat(
@@ -1098,7 +1237,7 @@ async def smart_chat(
     temperature: float = None,
     fallback_providers: List[str] = None
 ) -> str:
-    """Never-fail smart chat with automatic provider fallback"""
+    """Never-fail smart chat with automatic provider fallback - Bedrock first to avoid Gemini safety issues"""
     llm = NeverFailLLM(preferred_provider)
     return await llm.chat(
         prompt=prompt,

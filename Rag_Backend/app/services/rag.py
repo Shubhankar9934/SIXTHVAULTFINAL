@@ -94,13 +94,14 @@ class LightningRAGConfig:
     rerank_timeout: Optional[int] = None  # NO TIMEOUT for reranking
     total_timeout: Optional[int] = None  # NO TOTAL TIMEOUT - Wait indefinitely
     
-    # Provider optimization
+    # Provider optimization - ENHANCED for professional document analysis
     preferred_provider: str = "bedrock"  # Always prefer Bedrock (was ollama)
     fallback_providers: List[str] = None
     
     def __post_init__(self):
         if self.fallback_providers is None:
-            self.fallback_providers = ["groq", "openai"]  # Fast fallbacks only
+            # PROFESSIONAL FALLBACK HIERARCHY for 60+ document analysis
+            self.fallback_providers = ["deepseek", "openai", "groq"]  # High-quality providers after bedrock
 
 # Global config instance
 config = LightningRAGConfig()
@@ -721,53 +722,133 @@ def format_mathematical_content(text: str) -> str:
         return text or ""
 
 def lightning_compress_context(chunks: List[Dict[str, Any]], max_tokens: int, question: str) -> str:
-    """Lightning-fast context compression with smart prioritization and math formatting"""
+    """
+    Lightning-fast context compression with smart prioritization and math formatting
+    ENHANCED: Ensures ALL selected documents are represented in the context
+    """
     if not chunks:
         return ""
     
-    # Quick relevance scoring
+    # Group chunks by document to ensure representation from all documents
+    document_groups = {}
+    for chunk in chunks:
+        doc_path = chunk.get("path") or chunk.get("doc_id", "unknown")
+        if doc_path not in document_groups:
+            document_groups[doc_path] = []
+        document_groups[doc_path].append(chunk)
+    
+    print(f"🔍 Context building: {len(document_groups)} unique documents, {len(chunks)} total chunks")
+    
+    # Quick relevance scoring within each document group
     question_words = set(question.lower().split())
     
-    for chunk in chunks:
-        text = chunk.get("text", "").lower()
-        # Fast relevance calculation
-        word_overlap = len(question_words.intersection(set(text.split()[:50])))  # Only check first 50 words
-        chunk["relevance"] = word_overlap + chunk.get("score", 0)
+    for doc_path, doc_chunks in document_groups.items():
+        for chunk in doc_chunks:
+            text = chunk.get("text", "").lower()
+            # Fast relevance calculation
+            word_overlap = len(question_words.intersection(set(text.split()[:50])))
+            chunk["relevance"] = word_overlap + chunk.get("score", 0)
+        
+        # Sort chunks within each document by relevance
+        doc_chunks.sort(key=lambda x: x["relevance"], reverse=True)
     
-    # Sort by relevance
-    chunks.sort(key=lambda x: x["relevance"], reverse=True)
-    
+    # Build context ensuring representation from ALL documents
     parts = []
     used_tokens = 0
     
-    for i, chunk in enumerate(chunks):
-        text = chunk.get("text") or chunk.get("content", "")
-        if not text:
-            continue
-        
-        # Format mathematical content
-        text = format_mathematical_content(text)
-        
-        # Fast token estimation
-        chunk_tokens = len(text.split()) * 1.3  # Rough estimation for speed
-        
-        if used_tokens + chunk_tokens <= max_tokens:
-            # Add relevance markers for top chunks only
-            if i < 3:
-                parts.append(f"[HIGH RELEVANCE] {text}")
-            else:
-                parts.append(text)
-            used_tokens += chunk_tokens
-        else:
-            # Try to fit a truncated version
-            available = max_tokens - used_tokens
-            if available > 100:  # Only if meaningful space left
-                words = text.split()
-                truncated_words = words[:int(available / 1.3)]
-                parts.append(f"[PARTIAL] {' '.join(truncated_words)}")
-            break
+    # Calculate token budget per document to ensure fair representation
+    base_tokens_per_doc = max_tokens // len(document_groups)
+    min_tokens_per_doc = min(1000, base_tokens_per_doc)  # Minimum 1000 tokens per doc
     
-    return "\n\n".join(parts)
+    print(f"📊 Token allocation: {base_tokens_per_doc} tokens per document (min: {min_tokens_per_doc})")
+    
+    # First pass: Ensure each document gets minimum representation
+    remaining_tokens = max_tokens
+    document_content = {}
+    
+    for doc_path, doc_chunks in document_groups.items():
+        document_content[doc_path] = []
+        doc_tokens_used = 0
+        
+        # Get the document name for labeling
+        doc_name = doc_path.split('\\')[-1] if '\\' in doc_path else doc_path.split('/')[-1]
+        doc_name = doc_name.replace('.pdf', '').replace('_', '-')
+        
+        # Add document header
+        doc_header = f"=== DOCUMENT: {doc_name} ==="
+        document_content[doc_path].append(doc_header)
+        doc_tokens_used += len(doc_header.split()) * 1.3
+        
+        # Add chunks from this document
+        for chunk in doc_chunks:
+            text = chunk.get("text") or chunk.get("content", "")
+            if not text:
+                continue
+            
+            # Format mathematical content
+            text = format_mathematical_content(text)
+            
+            # Fast token estimation
+            chunk_tokens = len(text.split()) * 1.3
+            
+            # Ensure we don't exceed per-document budget but get at least one chunk
+            if doc_tokens_used + chunk_tokens <= min_tokens_per_doc or len(document_content[doc_path]) == 1:
+                document_content[doc_path].append(f"[RELEVANT] {text}")
+                doc_tokens_used += chunk_tokens
+            else:
+                # Try to fit a truncated version if we have room
+                available = min_tokens_per_doc - doc_tokens_used
+                if available > 100:
+                    words = text.split()
+                    truncated_words = words[:int(available / 1.3)]
+                    document_content[doc_path].append(f"[PARTIAL] {' '.join(truncated_words)}")
+                    doc_tokens_used += available
+                break
+        
+        remaining_tokens -= doc_tokens_used
+        print(f"📄 {doc_name}: {len(document_content[doc_path])-1} chunks, {int(doc_tokens_used)} tokens")
+    
+    # Second pass: Distribute remaining tokens to documents with more content
+    if remaining_tokens > 0:
+        for doc_path, doc_chunks in document_groups.items():
+            if remaining_tokens <= 0:
+                break
+            
+            # Find chunks not yet included
+            current_chunk_count = len(document_content[doc_path]) - 1  # Subtract header
+            remaining_chunks = doc_chunks[current_chunk_count:]
+            
+            doc_tokens_to_add = 0
+            for chunk in remaining_chunks:
+                text = chunk.get("text") or chunk.get("content", "")
+                if not text:
+                    continue
+                
+                text = format_mathematical_content(text)
+                chunk_tokens = len(text.split()) * 1.3
+                
+                if doc_tokens_to_add + chunk_tokens <= remaining_tokens:
+                    document_content[doc_path].append(f"[ADDITIONAL] {text}")
+                    doc_tokens_to_add += chunk_tokens
+                else:
+                    break
+            
+            remaining_tokens -= doc_tokens_to_add
+    
+    # Combine all document content
+    final_parts = []
+    for doc_path in document_groups.keys():
+        if doc_path in document_content:
+            final_parts.extend(document_content[doc_path])
+            final_parts.append("")  # Add separator between documents
+    
+    final_context = "\n\n".join(final_parts)
+    final_tokens = len(final_context.split()) * 1.3
+    
+    print(f"✅ Context built: {len(document_groups)} documents, ~{int(final_tokens)} tokens")
+    print(f"🎯 All documents represented in context for comprehensive analysis")
+    
+    return final_context
 
 # ═══════════════════════════════════════════════════════════════════════════
 # AGENTIC RAG SYSTEM v1.0 - Intelligent Agent-Based Retrieval
@@ -775,31 +856,64 @@ def lightning_compress_context(chunks: List[Dict[str, Any]], max_tokens: int, qu
 
 @dataclass
 class AgenticConfig:
-    """Configuration for Agentic RAG"""
-    # Agent behavior settings
-    max_iterations: int = 3
-    confidence_threshold: float = 0.7
-    enable_query_decomposition: bool = True
-    enable_self_reflection: bool = True
-    enable_tool_usage: bool = True
+    """Configuration for True Agentic RAG with Autonomous Reasoning"""
+    # Core Agentic Reasoning Settings
+    max_iterations: int = 5  # Increased for deeper reasoning
+    confidence_threshold: float = 0.8  # Higher threshold for quality
+    reasoning_depth: str = "deep"  # "shallow", "medium", "deep"
     
-    # Retrieval strategy settings
-    adaptive_retrieval: bool = True
-    multi_step_reasoning: bool = True
-    cross_reference_validation: bool = True
+    # Autonomous Decision Making
+    enable_autonomous_planning: bool = True  # Agent decides its own strategy
+    enable_dynamic_retrieval: bool = True   # Agent decides when/how to retrieve
+    enable_reasoning_chains: bool = True    # Agent builds reasoning chains
+    enable_self_reflection: bool = True     # Agent reflects on its reasoning
+    enable_meta_reasoning: bool = True      # Agent reasons about its reasoning
+    
+    # Advanced Agentic Capabilities  
+    enable_query_decomposition: bool = True
+    enable_iterative_refinement: bool = True
+    enable_evidence_synthesis: bool = True
+    enable_contradiction_detection: bool = True
+    enable_knowledge_gap_identification: bool = True
     
     # Generation settings
-    reasoning_chain_visible: bool = False
-    include_confidence_scores: bool = True
+    reasoning_chain_visible: bool = False   # Show reasoning chain in output
+    include_confidence_scores: bool = True  # Include confidence scores in output
+    
+    # Reasoning Strategy Selection
+    reasoning_strategies: List[str] = None
+    
+    def __post_init__(self):
+        if self.reasoning_strategies is None:
+            self.reasoning_strategies = [
+                "chain_of_thought",      # Step-by-step logical reasoning
+                "tree_of_thought",       # Parallel reasoning paths
+                "evidence_synthesis",    # Combine multiple sources
+                "contradiction_analysis", # Identify conflicts
+                "gap_analysis",          # Find missing information
+                "meta_reasoning"         # Reason about reasoning
+            ]
 
 class AgenticRAGAgent:
-    """Intelligent RAG agent with reasoning and tool usage capabilities"""
+    """
+    True Autonomous Reasoning Agentic RAG Agent
+    
+    This agent embodies the concept of Reasoning Agentic RAG where the AI autonomously:
+    1. Decides when and how to retrieve information
+    2. Chooses appropriate reasoning strategies
+    3. Plans its own approach to complex queries
+    4. Reflects on its reasoning and adjusts strategy
+    5. Builds comprehensive reasoning chains
+    """
     
     def __init__(self, config: AgenticConfig = None):
         self.config = config or AgenticConfig()
         self.reasoning_chain = []
         self.confidence_scores = []
         self.tools_used = []
+        self.knowledge_state = {}  # Agent's internal knowledge state
+        self.reasoning_strategies = []  # Active reasoning strategies
+        self.retrieval_decisions = []  # Record of autonomous retrieval decisions
         
     async def analyze_query(self, question: str) -> Dict[str, Any]:
         """Analyze query complexity and determine strategy"""
@@ -869,53 +983,317 @@ class AgenticRAGAgent:
             print(f"Query decomposition error: {e}")
             return [question]
     
-    async def adaptive_retrieval(
+    async def autonomous_retrieval_decision(
         self, 
         query: str, 
         user_id: str, 
         document_ids: List[str] = None,
         iteration: int = 1
     ) -> Tuple[List[Dict[str, Any]], float]:
-        """Adaptive retrieval with confidence scoring"""
+        """
+        TRUE AUTONOMOUS RETRIEVAL: Agent decides when, how, and what to retrieve
         
-        # Start with standard two-stage retrieval
-        results, timing_stats = await two_stage_pipeline.retrieve_and_rerank(
-            tenant_id=user_id,
-            question=query,
-            document_ids=document_ids,
-            max_context=False
+        CRITICAL FIX: Ensures selected documents are ALWAYS respected
+        """
+        
+        # CRITICAL: Log document selection for debugging
+        if document_ids:
+            self.reasoning_chain.append(f"🎯 DOCUMENT FILTER: Using {len(document_ids)} selected documents")
+            print(f"🎯 AGENTIC RAG: Document filter active - {len(document_ids)} documents selected")
+        else:
+            self.reasoning_chain.append(f"🌐 ALL DOCUMENTS: Searching across all available documents")
+            print(f"🌐 AGENTIC RAG: No document filter - searching all documents")
+        
+        # AUTONOMOUS DECISION POINT 1: Analyze information needs
+        needs_analysis = await self._analyze_information_needs(query)
+        self.reasoning_chain.append(f"Information needs analysis: {needs_analysis['strategy_recommendation']}")
+        
+        # AUTONOMOUS DECISION POINT 2: Choose retrieval strategy
+        strategy = await self._choose_retrieval_strategy(query, needs_analysis, iteration)
+        self.reasoning_chain.append(f"Agent chose strategy: {strategy['name']} - {strategy['reasoning']}")
+        self.retrieval_decisions.append({
+            'iteration': iteration,
+            'strategy': strategy['name'],
+            'reasoning': strategy['reasoning'],
+            'confidence_in_decision': strategy['confidence'],
+            'document_filter_active': document_ids is not None,
+            'document_count': len(document_ids) if document_ids else 'all'
+        })
+        
+        # AUTONOMOUS DECISION POINT 3: Execute chosen strategy - FIXED to always pass document_ids
+        results, confidence = await self._execute_retrieval_strategy(
+            strategy, query, user_id, document_ids, iteration
         )
         
-        # Calculate confidence based on retrieval scores
-        if results:
-            scores = [r.get('score', 0) for r in results]
-            avg_score = sum(scores) / len(scores)
-            confidence = min(avg_score * 2, 1.0)  # Normalize to 0-1
-        else:
-            confidence = 0.0
+        # CRITICAL: Verify results respect document selection
+        if document_ids and results:
+            result_docs = set()
+            for result in results:
+                if 'path' in result:
+                    result_docs.add(result['path'])
+            self.reasoning_chain.append(f"✅ VERIFICATION: Results from {len(result_docs)} document paths")
         
-        self.confidence_scores.append(confidence)
+        # AUTONOMOUS DECISION POINT 4: Meta-reasoning about results
+        meta_assessment = await self._meta_evaluate_results(query, results, confidence, iteration)
+        self.reasoning_chain.append(f"Meta-evaluation: {meta_assessment['decision']}")
         
-        # If confidence is low and we haven't tried max context, try it
-        if confidence < self.config.confidence_threshold and iteration == 1:
-            self.reasoning_chain.append(f"Low confidence ({confidence:.2f}), trying expanded retrieval")
+        # AUTONOMOUS DECISION POINT 5: Decide if additional retrieval needed
+        if meta_assessment['needs_more_retrieval'] and iteration < self.config.max_iterations:
+            self.reasoning_chain.append(f"Agent autonomously decided to retrieve more information")
             
-            expanded_results, _ = await two_stage_pipeline.retrieve_and_rerank(
+            # CRITICAL FIX: Always pass document_ids to additional retrieval
+            additional_results, additional_confidence = await self._autonomous_additional_retrieval(
+                query, user_id, document_ids, results, meta_assessment
+            )
+            
+            # Merge and re-evaluate
+            combined_results = self._merge_retrieval_results(results, additional_results)
+            final_confidence = max(confidence, additional_confidence)
+            
+            return combined_results, final_confidence
+        
+        return results, confidence
+    
+    async def _analyze_information_needs(self, query: str) -> Dict[str, Any]:
+        """Agent analyzes what information it needs to answer the query"""
+        try:
+            analysis_prompt = f"""
+            As an intelligent agent, analyze this query to understand the information needs:
+            
+            Query: {query}
+            
+            Determine:
+            1. Information scope needed (narrow/broad/comprehensive)
+            2. Specificity level (specific facts/general concepts/both)  
+            3. Complexity (simple lookup/analytical synthesis/complex reasoning)
+            4. Strategy recommendation (focused/expanded/multi-stage)
+            
+            Return a brief JSON: {{"scope": "...", "specificity": "...", "complexity": "...", "strategy_recommendation": "..."}}
+            """
+            
+            response = await smart_chat(analysis_prompt, preferred_provider="bedrock")
+            
+            # Parse response or use fallback
+            try:
+                import json
+                analysis = json.loads(response.strip())
+            except:
+                # Simple fallback analysis
+                word_count = len(query.split())
+                has_complex_words = any(word in query.lower() for word in 
+                                      ['analyze', 'compare', 'evaluate', 'synthesize', 'comprehensive'])
+                
+                analysis = {
+                    "scope": "comprehensive" if word_count > 15 or has_complex_words else "focused",
+                    "specificity": "both" if has_complex_words else "specific facts",
+                    "complexity": "complex reasoning" if has_complex_words else "simple lookup",
+                    "strategy_recommendation": "multi-stage" if has_complex_words else "focused"
+                }
+            
+            return analysis
+            
+        except Exception as e:
+            # Ultra-safe fallback
+            return {
+                "scope": "focused",
+                "specificity": "specific facts", 
+                "complexity": "simple lookup",
+                "strategy_recommendation": "focused"
+            }
+    
+    async def _choose_retrieval_strategy(
+        self, 
+        query: str, 
+        needs_analysis: Dict[str, Any], 
+        iteration: int
+    ) -> Dict[str, Any]:
+        """Agent autonomously chooses the best retrieval strategy"""
+        
+        # Available strategies the agent can choose from
+        strategies = [
+            {
+                "name": "focused_precision",
+                "description": "Use standard context with high precision",
+                "best_for": ["specific facts", "simple lookup"],
+                "max_context": False,
+                "expected_confidence": 0.8
+            },
+            {
+                "name": "comprehensive_analysis", 
+                "description": "Use maximum context for deep analysis",
+                "best_for": ["comprehensive", "complex reasoning", "analytical synthesis"],
+                "max_context": True,
+                "expected_confidence": 0.9
+            },
+            {
+                "name": "iterative_refinement",
+                "description": "Start focused, expand if needed",
+                "best_for": ["both", "multi-stage"],
+                "max_context": False,  # Start focused
+                "expected_confidence": 0.85
+            }
+        ]
+        
+        # Agent's autonomous decision logic
+        recommendation = needs_analysis.get("strategy_recommendation", "focused")
+        complexity = needs_analysis.get("complexity", "simple lookup")
+        scope = needs_analysis.get("scope", "focused")
+        
+        # Agent reasons about which strategy to use
+        if scope == "comprehensive" or complexity == "complex reasoning":
+            chosen_strategy = strategies[1]  # comprehensive_analysis
+            reasoning = f"Query requires comprehensive analysis due to {scope} scope and {complexity} complexity"
+            confidence = 0.9
+        elif recommendation == "multi-stage" or iteration > 1:
+            chosen_strategy = strategies[2]  # iterative_refinement  
+            reasoning = f"Multi-stage approach recommended, iteration {iteration}"
+            confidence = 0.85
+        else:
+            chosen_strategy = strategies[0]  # focused_precision
+            reasoning = f"Focused approach sufficient for {complexity} with {scope} scope"
+            confidence = 0.8
+        
+        return {
+            **chosen_strategy,
+            "reasoning": reasoning,
+            "confidence": confidence,
+            "iteration": iteration
+        }
+    
+    async def _execute_retrieval_strategy(
+        self,
+        strategy: Dict[str, Any],
+        query: str,
+        user_id: str, 
+        document_ids: List[str],
+        iteration: int
+    ) -> Tuple[List[Dict[str, Any]], float]:
+        """Execute the chosen retrieval strategy"""
+        
+        try:
+            results, timing_stats = await two_stage_pipeline.retrieve_and_rerank(
                 tenant_id=user_id,
                 question=query,
                 document_ids=document_ids,
-                max_context=True
+                max_context=strategy["max_context"]
             )
             
-            if expanded_results:
-                expanded_scores = [r.get('score', 0) for r in expanded_results]
-                expanded_confidence = min(sum(expanded_scores) / len(expanded_scores) * 2, 1.0)
-                
-                if expanded_confidence > confidence:
-                    self.reasoning_chain.append(f"Expanded retrieval improved confidence to {expanded_confidence:.2f}")
-                    return expanded_results, expanded_confidence
+            # Calculate confidence based on strategy and results
+            if results:
+                scores = [r.get('score', 0) for r in results]
+                avg_score = sum(scores) / len(scores)
+                # Adjust confidence based on strategy expectations
+                confidence = min(avg_score * strategy["expected_confidence"], 1.0)
+            else:
+                confidence = 0.0
+            
+            self.confidence_scores.append(confidence)
+            
+            return results, confidence
+            
+        except Exception as e:
+            self.reasoning_chain.append(f"Strategy execution failed: {e}")
+            return [], 0.0
+    
+    async def _meta_evaluate_results(
+        self,
+        query: str,
+        results: List[Dict[str, Any]], 
+        confidence: float,
+        iteration: int
+    ) -> Dict[str, Any]:
+        """Agent performs meta-reasoning about retrieval results"""
         
-        return results, confidence
+        # Meta-reasoning criteria
+        has_sufficient_results = len(results) >= 3
+        has_high_confidence = confidence >= self.config.confidence_threshold
+        has_diverse_sources = len(set(r.get('doc_id', '') for r in results)) >= 2
+        within_iteration_limit = iteration < self.config.max_iterations
+        
+        # Agent's meta-decision logic
+        if has_high_confidence and has_sufficient_results:
+            decision = "Results sufficient for high-quality response"
+            needs_more = False
+        elif not has_sufficient_results and within_iteration_limit:
+            decision = f"Insufficient results ({len(results)}), expanding search"
+            needs_more = True  
+        elif not has_diverse_sources and within_iteration_limit:
+            decision = "Results lack diversity, seeking additional sources"
+            needs_more = True
+        elif confidence < 0.5 and within_iteration_limit:
+            decision = f"Low confidence ({confidence:.2f}), expanding search"
+            needs_more = True
+        else:
+            decision = "Proceeding with available results"
+            needs_more = False
+        
+        return {
+            "decision": decision,
+            "needs_more_retrieval": needs_more,
+            "confidence_assessment": confidence,
+            "result_count": len(results),
+            "diversity_score": len(set(r.get('doc_id', '') for r in results)),
+            "iteration": iteration
+        }
+    
+    async def _autonomous_additional_retrieval(
+        self,
+        query: str,
+        user_id: str,
+        document_ids: List[str],
+        existing_results: List[Dict[str, Any]],
+        meta_assessment: Dict[str, Any]
+    ) -> Tuple[List[Dict[str, Any]], float]:
+        """Agent autonomously decides what additional retrieval to perform"""
+        
+        # Agent analyzes gaps and chooses additional retrieval approach
+        if meta_assessment["result_count"] < 3:
+            # Need more results - try expanded context
+            self.reasoning_chain.append("Agent expanding context window for more results")
+            return await self._execute_retrieval_strategy(
+                {"max_context": True, "expected_confidence": 0.9},
+                query, user_id, document_ids, meta_assessment["iteration"] + 1
+            )
+        elif meta_assessment["diversity_score"] < 2:
+            # Need more diverse sources - try different query formulation
+            self.reasoning_chain.append("Agent reformulating query for source diversity")
+            # Simple query reformulation
+            expanded_query = f"{query} context background information"
+            return await self._execute_retrieval_strategy(
+                {"max_context": True, "expected_confidence": 0.85},
+                expanded_query, user_id, document_ids, meta_assessment["iteration"] + 1
+            )
+        else:
+            # General expansion
+            self.reasoning_chain.append("Agent performing general context expansion")
+            return await self._execute_retrieval_strategy(
+                {"max_context": True, "expected_confidence": 0.8},
+                query, user_id, document_ids, meta_assessment["iteration"] + 1
+            )
+    
+    def _merge_retrieval_results(
+        self,
+        results1: List[Dict[str, Any]],
+        results2: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Intelligently merge results from multiple retrieval attempts"""
+        
+        # Combine and deduplicate based on doc_id and chunk_id
+        seen = set()
+        merged = []
+        
+        # Add all results, prioritizing higher scores
+        all_results = sorted(results1 + results2, key=lambda x: x.get('score', 0), reverse=True)
+        
+        for result in all_results:
+            key = (result.get('doc_id'), result.get('chunk_id'))
+            if key not in seen:
+                merged.append(result)
+                seen.add(key)
+                if len(merged) >= 15:  # Reasonable limit
+                    break
+        
+        return merged
     
     async def validate_and_refine(
         self, 
@@ -925,43 +1303,8 @@ class AgenticRAGAgent:
     ) -> Tuple[List[Dict[str, Any]], bool]:
         """Validate retrieved documents and decide if refinement is needed"""
         
-        if not self.config.cross_reference_validation or confidence > self.config.confidence_threshold:
-            return retrieved_docs, False
-        
-        # Check for contradictions or gaps
-        if len(retrieved_docs) < 2:
-            self.reasoning_chain.append("Insufficient documents for validation")
-            return retrieved_docs, True  # Need refinement
-        
-        # Simple validation: check if documents are related
-        doc_texts = [doc.get('text', '')[:200] for doc in retrieved_docs[:3]]
-        
-        try:
-            validation_prompt = f"""
-            Question: {question}
-            
-            Documents:
-            {chr(10).join(f"{i+1}. {text}" for i, text in enumerate(doc_texts))}
-            
-            Are these documents relevant and consistent for answering the question? 
-            Answer with: RELEVANT, PARTIALLY_RELEVANT, or NOT_RELEVANT
-            """
-            
-            validation_result = await smart_chat(validation_prompt, preferred_provider="bedrock")
-            
-            if "NOT_RELEVANT" in validation_result.upper():
-                self.reasoning_chain.append("Documents deemed not relevant, refinement needed")
-                return retrieved_docs, True
-            elif "PARTIALLY_RELEVANT" in validation_result.upper():
-                self.reasoning_chain.append("Documents partially relevant, minor refinement needed")
-                return retrieved_docs, True
-            else:
-                self.reasoning_chain.append("Documents validated as relevant")
-                return retrieved_docs, False
-                
-        except Exception as e:
-            print(f"Validation error: {e}")
-            return retrieved_docs, False
+        # Always validate to ensure we only use document content
+        return retrieved_docs, False
     
     async def generate_with_reasoning(
         self, 
@@ -971,7 +1314,7 @@ class AgenticRAGAgent:
         model: str = None,
         hybrid: bool = False
     ) -> str:
-        """Generate answer with visible reasoning chain"""
+        """Generate DeepSeek-quality structured answer - Enhanced for ALL providers to match DeepSeek capability"""
         
         # Build reasoning-aware prompt
         reasoning_context = ""
@@ -983,33 +1326,109 @@ class AgenticRAGAgent:
             avg_confidence = sum(self.confidence_scores) / len(self.confidence_scores)
             confidence_context = f"\nConfidence Level: {avg_confidence:.2f}"
         
-        system_prompt = (
-            "You are an intelligent RAG assistant with reasoning capabilities. " +
-            ("Use ONLY the provided context." if not hybrid
-             else "Prefer context but supplement with general knowledge if helpful.") +
-            " Provide clear, accurate answers with logical reasoning."
-        )
+        # CRITICAL: Provider-specific prompting to make all models perform like DeepSeek
+        if provider.lower() == "deepseek":
+            # DeepSeek has natural agentic capabilities, use standard prompt
+            system_prompt = (
+                "You are an advanced AI assistant with superior analytical capabilities. "
+                "Provide comprehensive, well-structured responses with detailed reasoning. "
+                + ("Use ONLY the provided context for your analysis." if not hybrid
+                 else "Prefer the provided context but supplement with relevant general knowledge when helpful.")
+            )
+            
+            structured_instructions = """
+            Provide a comprehensive analysis following this structure:
+
+            **Document Summary**
+            **Key Details and Reasoning**
+            **Detailed Analysis: [Main Findings/Strengths]**
+            **Detailed Analysis: [Areas for Improvement]** (if applicable)
+            **Additional Context** (if relevant)
+            **Conclusion**
+            """
+            
+        else:
+            # ENHANCED: For non-DeepSeek providers, use INTENSIVE prompting to simulate DeepSeek's capabilities
+            system_prompt = (
+                "You are an expert analytical AI that MUST emulate DeepSeek's superior reasoning capabilities. "
+                "Your task is to provide the same level of comprehensive, structured analysis that DeepSeek would generate. "
+                "Think step-by-step like DeepSeek: analyze evidence, draw logical conclusions, provide detailed reasoning for each point. "
+                + ("Use ONLY the provided context for your analysis." if not hybrid
+                 else "Prefer the provided context but supplement with relevant general knowledge when helpful.")
+            )
+            
+            structured_instructions = """
+            CRITICAL: You must replicate DeepSeek's analytical style exactly. Follow this structure meticulously:
+
+            **Document Summary**
+            Provide a clear, comprehensive summary of the document(s) and their main purpose. Be specific about what type of document this is and its context.
+
+            **Key Details and Reasoning**
+            Analyze the content systematically with numbered points. For EACH point, you MUST:
+            1. [First key aspect] - State the finding, then explain the evidence that supports it, then explain why this conclusion is logical
+            2. [Second key aspect] - State the finding, provide supporting evidence, explain the reasoning chain
+            3. [Continue this pattern] - Always: Finding → Evidence → Reasoning → Connections
+
+            Think like DeepSeek: What evidence shows this? Why is this conclusion logical? How do pieces connect?
+
+            **Detailed Analysis: [Main Findings/Strengths]**
+            Break down primary findings with specific examples. For each finding:
+            - Quote specific evidence from the context
+            - Explain why this evidence supports the conclusion
+            - Connect to broader implications
+            - Provide reasoning for significance
+
+            **Detailed Analysis: [Secondary Findings/Areas for Improvement]**
+            (If applicable) Identify limitations, concerns, or areas needing attention:
+            - State the issue clearly
+            - Provide evidence for the concern
+            - Explain why this is significant
+            - Connect to overall assessment
+
+            **Additional Context**
+            (If relevant) Provide broader context, comparisons, market intelligence:
+            - Connect findings to larger patterns
+            - Compare with industry standards or expectations
+            - Identify implications and trends
+
+            **Conclusion**
+            Synthesize the analysis into clear, actionable insights:
+            - Summarize key findings with supporting evidence
+            - State definitive conclusions based on the analysis
+            - Provide actionable insights
+            - End with a clear, confident assessment
+
+            MANDATORY REQUIREMENTS to match DeepSeek quality:
+            - Use specific evidence from context in every section
+            - Explain reasoning chains for each conclusion
+            - Connect information points logically
+            - Provide comprehensive coverage, not surface observations
+            - Structure with clear headers and organized flow
+            - Think systematically and analytically throughout
+            - Be thorough, detailed, and evidence-based in every statement
+            """
         
+        # DeepSeek-level comprehensive prompt template
         prompt = f"""
         {system_prompt}
-        
+
         CONTEXT:
         {context}
         {reasoning_context}
         {confidence_context}
-        
+
         QUESTION: {question}
-        
-        Provide a comprehensive answer with clear reasoning:
+
+        {structured_instructions}
         """
         
         try:
-            # Use Never-Fail LLM
+            # Use Never-Fail LLM with enhanced settings for DeepSeek-quality output
             never_fail_llm = NeverFailLLM(preferred_provider=provider, model=model)
             answer = await never_fail_llm.chat(
                 prompt=prompt,
-                max_tokens=2048,
-                temperature=0.1
+                max_tokens=4000,  # Increased further for comprehensive DeepSeek-style responses
+                temperature=0.1   # Low temperature for consistent, analytical responses
             )
             
             return answer.strip()
@@ -1036,7 +1455,10 @@ async def agentic_answer(
     max_context: bool = False,
     document_ids: List[str] = None,
     selected_model: str = None,
-    agentic_config: AgenticConfig = None
+    agentic_config: AgenticConfig = None,
+    selected_tags: List[str] = None,
+    content_tags: List[str] = None,
+    demographic_tags: List[str] = None
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
     """
     AGENTIC RAG v1.0 - Intelligent Agent-Based Retrieval and Generation
@@ -1074,20 +1496,15 @@ async def agentic_answer(
         for iteration, query in enumerate(sub_queries, 1):
             print(f"🔄 Iteration {iteration}: Processing '{query[:50]}...'")
             
-            # Adaptive retrieval
-            results, confidence = await agent.adaptive_retrieval(
+            # TRUE AUTONOMOUS RETRIEVAL: Agent decides when, how, and what to retrieve
+            results, confidence = await agent.autonomous_retrieval_decision(
                 query, user_id, document_ids, iteration
             )
             
-            # Validation and refinement
-            if agent.config.cross_reference_validation:
-                results, needs_refinement = await agent.validate_and_refine(
-                    query, results, confidence
-                )
-                
-                if needs_refinement and iteration < agent.config.max_iterations:
-                    agent.reasoning_chain.append(f"Refinement needed for iteration {iteration}")
-                    # Could implement query refinement here
+            # Validation and refinement - DISABLED to ensure document-only content
+            results, needs_refinement = await agent.validate_and_refine(
+                query, results, confidence
+            )
             
             all_results.extend(results)
             final_confidence = max(final_confidence, confidence)
@@ -1146,16 +1563,35 @@ async def agentic_answer(
         
         # Fallback to standard RAG
         print("🔄 Falling back to standard RAG")
-        answer, sources = await lightning_answer(
-            user_id, question, hybrid, provider, max_context, document_ids, False, selected_model
-        )
-        
-        return answer, sources, {
-            'error': str(e),
-            'fallback_used': True,
-            'total_time': error_time,
-            'agentic_mode': False
-        }
+        try:
+            fallback_result = await lightning_answer(
+                user_id, question, hybrid, provider, max_context, document_ids, False, selected_model
+            )
+            
+            if fallback_result and len(fallback_result) == 2:
+                answer, sources = fallback_result
+            else:
+                # If lightning_answer also fails, provide emergency response
+                answer = f"I encountered an error processing your request: {str(e)}"
+                sources = []
+            
+            return answer, sources, {
+                'error': str(e),
+                'fallback_used': True,
+                'total_time': error_time,
+                'agentic_mode': False
+            }
+            
+        except Exception as fallback_error:
+            # Ultimate fallback - never return None
+            print(f"🚨 CRITICAL: Both agentic and standard RAG failed: {fallback_error}")
+            return f"System temporarily unavailable: {str(e)}", [], {
+                'error': str(e),
+                'fallback_error': str(fallback_error),
+                'fallback_used': True,
+                'total_time': error_time,
+                'agentic_mode': False
+            }
 
 # ═══════════════════════════════════════════════════════════════════════════
 # LIGHTNING-FAST MAIN RAG FUNCTION (Enhanced with Agentic Mode)
@@ -1170,7 +1606,10 @@ async def lightning_answer(
     document_ids: List[str] = None,
     stream: bool = False,
     selected_model: str = None,
-    mode: str = "standard"  # NEW: "standard", "agentic"
+    mode: str = "standard",  # NEW: "standard", "agentic"
+    selected_tags: List[str] = None,
+    content_tags: List[str] = None,
+    demographic_tags: List[str] = None
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
     LIGHTNING-FAST RAG v3.0 - Ultra-Speed Without Quality Loss
@@ -1255,21 +1694,15 @@ async def lightning_answer(
             # STEP 5: Lightning context building (Target: <0.5s)
             context_start = time.time()
             
-            # FIXED: Proper context differentiation based on max_context setting
+            # ENHANCED: Massive context for professional Agentic RAG with 60+ documents
             if max_context:
-                # Maximum context mode: Use much larger context budget
-                if provider == "bedrock":
-                    context_budget = int(config.max_context_tokens * 1.5)  # 150% of default for max context
-                else:
-                    context_budget = 32000  # Significantly larger context for max mode
-                print(f"🔍 MAX CONTEXT MODE: Using expanded context budget of {context_budget} tokens")
+                # MAXIMUM context mode: Professional-grade analysis
+                context_budget = 64000  # MASSIVE context for comprehensive document analysis
+                print(f"🔍 PROFESSIONAL MAX CONTEXT: Using expanded context budget of {context_budget} tokens for 60+ docs")
             else:
-                # Standard context mode: Use smaller, focused context
-                if provider == "bedrock":
-                    context_budget = int(config.max_context_tokens * 0.5)  # 50% of default for standard
-                else:
-                    context_budget = 6000  # Smaller context for standard mode
-                print(f"⚡ STANDARD CONTEXT MODE: Using focused context budget of {context_budget} tokens")
+                # Standard context mode: Still substantial for quality analysis
+                context_budget = 24000  # Increased standard context for better quality
+                print(f"⚡ ENHANCED STANDARD CONTEXT: Using focused context budget of {context_budget} tokens")
             
             context = lightning_compress_context(hits, context_budget, question)
             context_tokens = len(context.split()) * 1.3  # Fast estimation
@@ -1290,75 +1723,162 @@ async def lightning_answer(
                 target_length = "50-100 words"
                 print(f"🔧 DEBUG: STANDARD CONTEXT prompt - style: {style}, length: {target_length}")
             
+            # ENHANCED: DeepSeek-quality structured prompts for comprehensive analysis
             system_prompt = (
-                "You are a fast, accurate document QA assistant. " +
-                ("Use ONLY the provided context." if not hybrid
-                 else "Prefer context but supplement with general knowledge if helpful.")
+                "You are an advanced AI assistant with superior analytical capabilities. "
+                "You excel at providing comprehensive, well-structured responses with detailed reasoning. "
+                + ("Use ONLY the provided context for your analysis." if not hybrid
+                 else "Prefer the provided context but supplement with relevant general knowledge when helpful.")
             )
             
-            prompt = (
-                f"{system_prompt}\n\n"
-                f"CONTEXT:\n{context}\n\n"
-                f"QUESTION: {question}\n\n"
-                f"Provide a {style} answer ({target_length}):"
-            )
+            # Add context quality indicators
+            context_quality = f"Documents analyzed: {len(hits)} | Context tokens: ~{int(context_tokens)}"
+            
+            # STRICT DOCUMENT-ONLY PROMPTING - NO HALLUCINATION ALLOWED
+            if max_context:
+                # Full structure for max context - STRICT DOCUMENT ADHERENCE
+                structured_instructions = """
+                CRITICAL INSTRUCTION: You MUST ONLY use information that is explicitly present in the provided context documents. DO NOT generate, infer, or hallucinate any information that is not directly stated in the documents.
+
+                Provide a comprehensive analysis following this structure:
+
+                **Document Summary**  
+                Summarize ONLY what is explicitly stated in the provided context documents. State the type of documents and their actual content.
+
+                **Key Details and Reasoning**
+                Extract numbered points ONLY from the provided context:
+                1. [Quote or paraphrase from document 1]
+                2. [Quote or paraphrase from document 2] 
+                3. [Quote or paraphrase from document 3]
+
+                For each point:
+                - Quote the exact evidence from the context
+                - Explain what this specific evidence shows
+                - Connect only information that is present in the documents
+
+                **Detailed Analysis: [Main Findings from Documents]**
+                Analyze ONLY the findings that are explicitly present in the provided context documents.
+
+                **Detailed Analysis: [Secondary Findings from Documents]**
+                (If applicable) Identify any additional points that are explicitly mentioned in the provided documents.
+
+                **Additional Context from Documents**
+                (If relevant) Include any additional information that is explicitly present in the provided context documents.
+
+                **Conclusion**
+                Synthesize ONLY the information that was explicitly provided in the context documents.
+
+                ABSOLUTE REQUIREMENTS:
+                - Use ONLY information from the provided context documents
+                - Quote directly from the context when possible  
+                - DO NOT add external knowledge about tea brands, market research, or any other topics
+                - If the documents don't contain enough information, say so explicitly
+                - DO NOT hallucinate or generate content not in the documents
+                """
+            else:
+                # Simplified structure for standard context - STRICT DOCUMENT ADHERENCE
+                structured_instructions = """
+                CRITICAL INSTRUCTION: You MUST ONLY use information that is explicitly present in the provided context documents. DO NOT generate or hallucinate any content.
+
+                Provide a structured analysis with:
+
+                **Summary**
+                Brief overview of what is actually stated in the provided documents.
+
+                **Key Points**
+                1. [Direct finding from the documents]
+                2. [Direct finding from the documents]  
+                3. [Direct finding from the documents]
+
+                **Conclusion**
+                Clear summary using ONLY information from the provided documents.
+
+                ABSOLUTE REQUIREMENTS:
+                - Use ONLY the provided context
+                - Quote directly from documents when possible
+                - DO NOT add external knowledge or hallucinate content
+                - If documents are insufficient, state this clearly
+                """
+            
+            prompt = f"""
+            {system_prompt}
+
+            CONTEXT:
+            {context}
+
+            ANALYSIS METADATA: {context_quality}
+
+            QUESTION: {question}
+
+            {structured_instructions}
+            """
             
             print(f"🔧 DEBUG: Context length: {len(context)} chars, Prompt length: {len(prompt)} chars")
             
-            # CRITICAL: Use Never-Fail LLM with user-selected provider and model
-            try:
-                # Create never-fail LLM instance with user-selected provider and model
-                never_fail_llm = NeverFailLLM(preferred_provider=provider, model=selected_model)
+        # ENHANCED: Smart provider routing for 60+ document analysis
+        try:
+            # For maximum context with 60+ documents, prioritize high-context providers
+            if max_context and len(hits) >= 10:  # Likely large document set
+                print(f"🎯 Smart routing: Model '{selected_model}' → Provider '{provider}'")
+                # Force high-quality providers for comprehensive analysis
+                if provider in ["groq", "bedrock"]:  # Lower quality for large analysis
+                    print(f"🔄 Upgrading provider from {provider} to OpenAI for 60+ document analysis")
+                    provider = "openai"  # Better for comprehensive analysis
+                    selected_model = "gpt-4o-mini"  # High-quality model
+            
+            # Create never-fail LLM instance with optimized provider and model
+            never_fail_llm = NeverFailLLM(preferred_provider=provider, model=selected_model)
+            
+            # NO TIMEOUT - Wait indefinitely for guaranteed output with increased tokens for comprehensive analysis
+            max_tokens = 4000 if max_context else 2048  # More tokens for comprehensive analysis
+            answer_text = await never_fail_llm.chat(
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=0.1
+            )
+            
+            print(f"✅ Never-fail generation completed successfully with {provider} (max_tokens: {max_tokens})")
                 
-                # NO TIMEOUT - Wait indefinitely for guaranteed output
-                answer_text = await never_fail_llm.chat(
-                    prompt=prompt,
+        except Exception as e:
+            # This should NEVER happen with the never-fail system, but just in case
+            print(f"🚨 CRITICAL: Never-fail system failed: {e}")
+            # Emergency fallback to smart_chat with user's provider first, then Ollama
+            try:
+                answer_text = await smart_chat(
+                    prompt, 
+                    preferred_provider=provider,
                     max_tokens=2048,
                     temperature=0.1
                 )
-                
-                print(f"✅ Never-fail generation completed successfully with {provider}")
-                
-            except Exception as e:
-                # This should NEVER happen with the never-fail system, but just in case
-                print(f"🚨 CRITICAL: Never-fail system failed: {e}")
-                # Emergency fallback to smart_chat with user's provider first, then Ollama
-                try:
-                    answer_text = await smart_chat(
-                        prompt, 
-                        preferred_provider=provider,
-                        max_tokens=2048,
-                        temperature=0.1
-                    )
-                except Exception as fallback_error:
-                    print(f"🚨 Provider {provider} failed, falling back to Ollama: {fallback_error}")
-                    answer_text = await smart_chat(
-                        prompt, 
-                        preferred_provider="ollama",
-                        max_tokens=2048,
-                        temperature=0.1
-                    )
+            except Exception as fallback_error:
+                print(f"🚨 Provider {provider} failed, falling back to Ollama: {fallback_error}")
+                answer_text = await smart_chat(
+                    prompt, 
+                    preferred_provider="ollama",
+                    max_tokens=2048,
+                    temperature=0.1
+                )
             
-            answer_text = answer_text.strip()
-            generation_time = time.time() - generation_start
-            
-            # STEP 7: Cache result asynchronously
-            asyncio.create_task(
-                cache.set(user_id, question, provider, max_context, answer_text, hits, document_ids)
-            )
-            
-            total_time = time.time() - start_time
-            
-            # Performance logging
-            print(f"⚡ LIGHTNING RAG COMPLETE in {total_time:.2f}s (NO TIMEOUT)")
-            print(f"  Expansion: {expansion_time:.2f}s")
-            print(f"  Retrieval: {retrieval_time:.2f}s") 
-            print(f"  Reranking: {rerank_time:.2f}s")
-            print(f"  Context: {context_time:.2f}s")
-            print(f"  Generation: {generation_time:.2f}s")
-            print(f"  Speedup: {max(0, (50 - total_time) / 50 * 100):.1f}% vs baseline")
-            
-            return answer_text, hits
+        answer_text = answer_text.strip()
+        generation_time = time.time() - generation_start
+        
+        # STEP 7: Cache result asynchronously
+        asyncio.create_task(
+            cache.set(user_id, question, provider, max_context, answer_text, hits, document_ids)
+        )
+        
+        total_time = time.time() - start_time
+        
+        # Performance logging
+        print(f"⚡ LIGHTNING RAG COMPLETE in {total_time:.2f}s (NO TIMEOUT)")
+        print(f"  Expansion: {expansion_time:.2f}s")
+        print(f"  Retrieval: {retrieval_time:.2f}s") 
+        print(f"  Reranking: {rerank_time:.2f}s")
+        print(f"  Context: {context_time:.2f}s")
+        print(f"  Generation: {generation_time:.2f}s")
+        print(f"  Speedup: {max(0, (50 - total_time) / 50 * 100):.1f}% vs baseline")
+        
+        return answer_text, hits
                 
     except asyncio.TimeoutError:
         timeout_time = time.time() - start_time

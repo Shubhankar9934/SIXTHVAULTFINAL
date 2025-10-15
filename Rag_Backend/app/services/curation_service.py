@@ -596,7 +596,9 @@ class CurationService:
                     auto_generated=True,
                     generation_method=generation_type,
                     status='active',
-                    curation_type=curation_data.get('curation_type', 'general')
+                    curation_type=curation_data.get('curation_type', 'general'),
+                    is_public=False,  # Default to private
+                    created_by_admin=False  # Default to false for user-created curations
                 )
                 session.add(curation)
                 session.flush()  # Get the ID
@@ -888,11 +890,8 @@ class CurationService:
             
             # Generate content using the specified provider and model
             try:
-                # Use the LLM factory to get a response
-                if provider == "ollama":
-                    llm = get_llm(provider="ollama", model=model)
-                else:
-                    llm = get_llm(provider=provider, model=model)
+                # Use the LLM factory to get a response with bedrock as preferred provider
+                llm = get_llm(provider=provider, model=model)
                     
                 generated_content = await llm.chat(prompt=content_prompt)
                 
@@ -969,37 +968,49 @@ class CurationService:
         # Determine curation type and customize prompt accordingly
         curation_type = getattr(curation, 'curation_type', None) or 'general'
         
-        # Base prompt structure
-        base_prompt = f"""Create a comprehensive business intelligence curation titled "{curation.title}".
+        # ENHANCED: Use superior Agentic RAG prompt strategy for AI Curation generation
+        doc_count = len(documents)
+        context_quality = f"Documents analyzed: {doc_count} | Keywords: {keywords_str} | Themes: {len(doc_themes)} unique"
+        
+        base_prompt = f"""You are an intelligent business intelligence curation assistant with advanced reasoning capabilities. Create a comprehensive curation titled "{curation.title}" with clear, accurate analysis and logical reasoning.
 
-**Curation Description**: {curation.description or 'Comprehensive analysis based on uploaded documents'}
+**CURATION OVERVIEW**:
+- **Title**: {curation.title}
+- **Description**: {curation.description or 'Comprehensive analysis based on uploaded documents'}
+- **Analysis Scope**: {context_quality}
 
-**Document Analysis**: You have access to {len(documents)} documents. Here are their summaries:
+**DOCUMENT CONTEXT**:
+You have access to {doc_count} documents with the following summaries:
 
 {chr(10).join(doc_summaries[:5])}  # Include top 5 document summaries
 
-{"**Document Insights**:" + chr(10) + chr(10).join(doc_insights[:3]) if doc_insights else ""}
+{"**KEY INSIGHTS FROM DOCUMENTS**:" + chr(10) + chr(10).join(doc_insights[:3]) if doc_insights else ""}
 
-**CRITICAL REQUIREMENTS - STRICTLY FOLLOW THESE RULES**:
-- NEVER add percentages, statistics, or numerical data that are not explicitly present in the source documents
-- NEVER fabricate or estimate potential ROI, growth rates, market share, conversion rates, or any quantitative metrics
-- NEVER use phrases like "potential X% increase", "estimated Y% improvement", "could result in Z% growth", "X-Y% reduction", "increase by X%"
-- NEVER create dummy percentages or made-up statistics to make the content sound more authoritative
-- Base ALL insights strictly on the actual content and data present in the provided documents
-- If no specific metrics are provided in the documents, focus on qualitative insights only
-- When referencing data, always ensure it comes directly from the source documents
-- Use phrases like "based on the feedback provided", "according to the document", "the analysis shows" when making claims
-- If you want to suggest potential impact, use qualitative terms like "significant", "substantial", "notable", "considerable" instead of percentages
+**REASONING PROCESS**:
+- Multi-document analysis and cross-referencing
+- Pattern identification across {doc_count} source documents
+- Evidence-based insights with logical reasoning
+- Strategic implications assessment
 
-**Format Requirements**:
-- Use clear markdown formatting with headers, bullet points, and emphasis
-- Make it visually appealing and easy to scan
-- Include specific data points and examples ONLY from the provided documents
-- Maintain a professional, business-focused tone
-- Ensure the content is actionable and valuable for decision-making
-- Ground all insights in the actual document content
+**CRITICAL REQUIREMENTS - SUPERIOR ANALYSIS STANDARDS**:
+- Provide clear, accurate answers with logical reasoning and comprehensive analysis
+- Use ONLY the provided document context for all claims and insights
+- NEVER add percentages, statistics, or numerical data not explicitly present in source documents
+- NEVER fabricate estimates, projections, or quantitative metrics
+- Base ALL insights strictly on actual document content with clear reasoning
+- When referencing data, always cite: "according to the document analysis" or "based on the provided evidence"
+- Use qualitative impact terms: "significant", "substantial", "notable", "considerable" instead of fabricated percentages
+- Provide comprehensive analysis with strategic reasoning and actionable insights
 
-**Length**: Aim for 1200-1600 words of substantial, valuable content based strictly on document analysis."""
+**ENHANCED FORMAT REQUIREMENTS**:
+- Use clear markdown formatting with professional structure
+- Include executive-level insights with supporting reasoning
+- Provide actionable recommendations grounded in document evidence
+- Maintain strategic business intelligence tone with analytical depth
+- Ensure content demonstrates clear reasoning chains and comprehensive analysis
+- Focus on value-driven insights that inform decision-making
+
+**TARGET**: Generate 1200-1600 words of superior business intelligence content with advanced reasoning and comprehensive analysis."""
 
         # Customize content structure based on curation type
         if curation_type == 'executive_summary':
@@ -1316,7 +1327,9 @@ This curation of {doc_count} documents focusing on {keywords_str.lower()} provid
                 document_count=len(relevant_docs),
                 auto_generated=False,  # This is user-created
                 generation_method="custom",
-                status='active'
+                status='active',
+                is_public=False,  # Default to private
+                created_by_admin=False  # Default to false for user-created curations
             )
             
             session.add(curation)

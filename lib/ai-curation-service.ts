@@ -425,6 +425,76 @@ Would you like me to help you rephrase this as a question for the main chat inte
   }
 
   /**
+   * Update curation content with user edits and save to database
+   */
+  async updateCurationContent(
+    curationId: string,
+    content: string,
+    title?: string,
+    description?: string
+  ): Promise<{ success: boolean; message: string }> {
+    try {
+      console.log('AI Curation Service: Updating curation content for:', curationId)
+      
+      // Update via backend API
+      const result = await ragApiClient.updateCurationContent(curationId, content, title, description)
+      
+      if (result.success) {
+        console.log('✅ AI Curation Service: Successfully updated curation content')
+        
+        // Update local curation data if available
+        const curationIndex = this.curations.findIndex(c => c.id === curationId)
+        if (curationIndex !== -1) {
+          if (title) {
+            this.curations[curationIndex].title = title
+          }
+          if (description) {
+            this.curations[curationIndex].description = description
+          }
+          this.curations[curationIndex].lastUpdated = new Date().toISOString()
+          this.curations[curationIndex].status = 'active'
+          
+          // Update cache
+          cacheManager.set(CacheKeys.curations(), this.curations, this.DATA_TTL)
+        }
+        
+        // Clear cached content to force reload of updated content
+        cacheManager.clearByPattern(`curation_content_${curationId}_.*`)
+        
+        // Cache the new content for all provider/model combinations that might be used
+        const commonProviders = ['gemini', 'openai', 'groq']
+        const commonModels = ['gemini-1.5-flash', 'gpt-4o-mini', 'llama3-8b-8192']
+        
+        for (const provider of commonProviders) {
+          for (const model of commonModels) {
+            const cacheKey = CacheKeys.curationContent(curationId, provider, model)
+            cacheManager.set(cacheKey, content, this.CONTENT_TTL)
+          }
+        }
+        
+        console.log('🔄 AI Curation Service: Updated local cache with new content')
+        
+        return {
+          success: true,
+          message: 'Curation content updated successfully'
+        }
+      } else {
+        console.error('❌ AI Curation Service: Failed to update curation content:', result.message)
+        return {
+          success: false,
+          message: result.message || 'Failed to update curation content'
+        }
+      }
+    } catch (error) {
+      console.error('💥 AI Curation Service: Error updating curation content:', error)
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Unknown error occurred'
+      }
+    }
+  }
+
+  /**
    * Extract meaningful keywords from a title for better curation creation
    */
   private extractKeywordsFromTitle(title: string): string[] {
